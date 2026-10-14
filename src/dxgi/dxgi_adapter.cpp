@@ -11,6 +11,15 @@
 
 namespace dxmt {
 
+#ifdef DXMT_NATIVE
+// An embedder forwards a Windows program's calls, so the descriptions it hands
+// in have Windows' layout, with a 16-bit WCHAR. Neptune sizes them so.
+static_assert(sizeof(WCHAR) == 2);
+static_assert(sizeof(DXGI_ADAPTER_DESC) == 304 && offsetof(DXGI_ADAPTER_DESC, VendorId) == 256);
+static_assert(sizeof(DXGI_ADAPTER_DESC1) == 312 && sizeof(DXGI_ADAPTER_DESC3) == 320);
+static_assert(sizeof(DXGI_OUTPUT_DESC) == 96);
+#endif
+
 const GUID kWineDXGIAdapterUUID = {0x17399d75,
                                    0x964e,
                                    0x4c03,

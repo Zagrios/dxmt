@@ -344,10 +344,12 @@ public:
     WCHAR buffer[MAX_PATH];
     UNICODE_STRING name_str;
     if (pName) {
-      DWORD session, len, name_len = wcslen(pName);
+      DWORD session, len, name_len = str::length(pName);
 
       ProcessIdToSessionId(GetCurrentProcessId(), &session);
-      len = swprintf(buffer, ARRAYSIZE(buffer), L"\\Sessions\\%u\\BaseNamedObjects\\", session);
+      // WCHAR is 16-bit on every target, wchar_t only on Windows: no wcs* functions.
+      std::string prefix = str::format("\\Sessions\\", session, "\\BaseNamedObjects\\");
+      len = str::transcodeString(buffer, ARRAYSIZE(buffer), prefix.c_str(), prefix.size());
       memcpy(buffer + len, pName, (name_len + 1) * sizeof(WCHAR));
       name_str.MaximumLength = name_str.Length = (len + name_len) * sizeof(WCHAR);
       name_str.MaximumLength += sizeof(WCHAR);
@@ -820,10 +822,12 @@ ImportSharedTextureByName(
 
   WCHAR buffer[MAX_PATH];
   UNICODE_STRING name_str;
-  DWORD session, len, name_len = wcslen(lpName);
+  DWORD session, len, name_len = str::length(lpName);
 
   ProcessIdToSessionId(GetCurrentProcessId(), &session);
-  len = swprintf(buffer, ARRAYSIZE(buffer), L"\\Sessions\\%u\\BaseNamedObjects\\", session);
+  // WCHAR is 16-bit on every target, wchar_t only on Windows: no wcs* functions.
+  std::string prefix = str::format("\\Sessions\\", session, "\\BaseNamedObjects\\");
+  len = str::transcodeString(buffer, ARRAYSIZE(buffer), prefix.c_str(), prefix.size());
   memcpy(buffer + len, lpName, (name_len + 1) * sizeof(WCHAR));
   name_str.MaximumLength = name_str.Length = (len + name_len) * sizeof(WCHAR);
   name_str.MaximumLength += sizeof(WCHAR);

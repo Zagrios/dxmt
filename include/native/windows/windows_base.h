@@ -27,7 +27,7 @@ typedef int32_t *LPLONG;
 
 typedef int32_t HRESULT;
 
-typedef wchar_t WCHAR;
+typedef char16_t WCHAR;
 typedef WCHAR *NWPSTR, *LPWSTR, *PWSTR;
 typedef unsigned char UCHAR, *PUCHAR;
 
@@ -132,9 +132,9 @@ typedef UINT_PTR* PUINT_PTR;
 #endif /*STRICT*/
 
 typedef char* LPSTR;
-typedef wchar_t* LPWSTR;
+typedef WCHAR* LPWSTR;
 typedef const char* LPCSTR;
-typedef const wchar_t* LPCWSTR;
+typedef const WCHAR* LPCWSTR;
 
 typedef struct LUID {
   DWORD LowPart;
