@@ -29,7 +29,11 @@ class MTLD3D12HeapImpl : public MTLD3D12Pageable<MTLD3D12Heap> {
 public:
   MTLD3D12HeapImpl(MTLD3D12Device *pDevice) : MTLD3D12Pageable<MTLD3D12Heap>(pDevice) {}
 
-  ~MTLD3D12HeapImpl() {}
+  ~MTLD3D12HeapImpl() {
+    if (heap)
+      device_->UnregisterResidency(heap);
+    heap = {};
+  }
 
   HRESULT
   STDMETHODCALLTYPE
@@ -54,6 +58,39 @@ public:
 
   HRESULT
   Initialize(const D3D12_HEAP_DESC *pDesc) {
+    if (pDesc->Flags & D3D12_HEAP_FLAG_ALLOW_DISPLAY)
+      return E_INVALIDARG; // must be committed resource
+
+    desc_ = *pDesc;
+    desc_.Properties.CreationNodeMask = 1;
+    desc_.Properties.VisibleNodeMask = 1;
+
+
+    switch (pDesc->Alignment) {
+    case 0:
+      desc_.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+      [[fallthrough]];
+    case D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT:
+    case D3D12_DEFAULT_MSAA_RESOURCE_PLACEMENT_ALIGNMENT:
+      break;
+    default:
+      return E_INVALIDARG;
+    }
+
+    auto size_aligned = align(pDesc->SizeInBytes, desc_.Alignment);
+    if (!size_aligned)
+      return E_INVALIDARG;
+
+    WMTHeapInfo info;
+    info.options = {}; // FIXME: ensure this agrees with {Buffer|Texture}AllocationFlag?
+    info.size = size_aligned;
+    info.sparse_page_size = WMTSparsePageSize16;
+    info.type = WMTHeapTypePlacement;
+
+    heap = device_->GetMTLDevice().newHeap(info);
+
+    device_->RegisterResidency(heap);
+
     return S_OK;
   }
 

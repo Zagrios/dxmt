@@ -19,6 +19,8 @@
 #pragma once
 
 #include "d3d12_pageable.hpp"
+#include "dxmt_command_clear.hpp"
+#include "dxmt_ring_bump_allocator.hpp"
 
 namespace dxmt {
 
@@ -37,11 +39,41 @@ ptr_add(const void *const p, const std::uintptr_t &amount) noexcept {
   return reinterpret_cast<void *>(reinterpret_cast<std::uintptr_t>(p) + amount);
 }
 
+struct IndirectComputeCommandData {
+  uint64_t cmd_buf;
+  uint64_t max_count;
+  uint64_t max_count_buffer;
+  uint64_t argument_buffer;
+  uint64_t static_samplers;
+  uint64_t rootsig_qwords;
+  uint32_t rootsig_qwords_stride;
+  uint32_t tgsize_x;
+  uint32_t tgsize_y;
+  uint32_t tgsize_z;
+};
+
+struct IndirectRenderCommandData {
+  uint64_t cmd_buf;
+  uint64_t max_count;
+  uint64_t max_count_buffer;
+  uint64_t argument_buffer;
+  uint64_t static_samplers;
+  uint64_t rootsig_qwords;
+  uint32_t rootsig_qwords_stride;
+  uint32_t primitive_type;
+  uint64_t vertex_buffer;
+  uint64_t index_buffer;
+  DXGI_FORMAT index_buffer_format;
+  uint32_t vertex_argbuf_stride;
+};
+
 class MTLD3D12CommandAllocatorImpl : public MTLD3D12Pageable<MTLD3D12CommandAllocator> {
   friend class MTLD3D12GraphicsCommandListImpl;
+  friend struct SimpleCommandContext<MTLD3D12CommandAllocatorImpl>;
 
   D3D12_COMMAND_LIST_TYPE type_;
-  
+
+  std::vector<void *> spilled_cpu_heap_;
   void *cpu_heap_ = nullptr;
   size_t cpu_heap_offset_;
 
@@ -55,6 +87,14 @@ class MTLD3D12CommandAllocatorImpl : public MTLD3D12Pageable<MTLD3D12CommandAllo
   size_t encoder_count_;
 
   small_vector<EncoderData, 64> encoder_lists_;
+
+  small_vector<WMT::Reference<WMT::IndirectCommandBuffer>, 4> icb_;
+
+  ClearUAV<MTLD3D12CommandAllocatorImpl> clear_uav_;
+  ClearRTV<MTLD3D12CommandAllocatorImpl> clear_rtv_;
+
+  RingBumpState<GpuPrivateBufferBlockAllocator> copy_temp_allocator_;
+  uint64_t copy_temp_version_;
 
 public:
   MTLD3D12CommandAllocatorImpl(MTLD3D12Device *pDevice, D3D12_COMMAND_LIST_TYPE Type);
@@ -114,11 +154,19 @@ public:
 
   void *
   AllocateCPUHeap(size_t Length, size_t Alignment) {
-    std::size_t adjustment = align_forward_adjustment((void *)cpu_heap_offset_, Alignment);
-    auto aligned = cpu_heap_offset_ + adjustment;
-    cpu_heap_offset_ = aligned + Length;
-    assert(cpu_heap_offset_ < kCPUHeapSize);
-    return ptr_add(cpu_heap_, aligned);
+    assert(Length < kCPUHeapSize);
+    for (;;) {
+      std::size_t adjustment = align_forward_adjustment((void *)cpu_heap_offset_, Alignment);
+      auto aligned = cpu_heap_offset_ + adjustment;
+      cpu_heap_offset_ = aligned + Length;
+      if (unlikely(cpu_heap_offset_ >= kCPUHeapSize)) {
+        spilled_cpu_heap_.push_back(cpu_heap_);
+        cpu_heap_ = malloc(kCPUHeapSize);
+        cpu_heap_offset_ = 0;
+        continue;
+      }
+      return ptr_add(cpu_heap_, aligned);
+    }
   }
 
   template <typename T>
@@ -159,6 +207,18 @@ public:
     return *storage;
   }
 
+  template <typename cmd_struct>
+  cmd_struct &
+  EncodeComputeCommand() {
+    assert(encoder_current->type == EncoderType::Compute);
+    auto encoder = static_cast<ComputeEncoderData *>(encoder_current);
+    auto storage = (cmd_struct *)AllocateCPUHeap(sizeof(cmd_struct), 16);
+    encoder->cmd_tail->next.set(storage);
+    encoder->cmd_tail = (wmtcmd_base *)storage;
+    storage->next.set(nullptr);
+    return *storage;
+  }
+
   std::tuple<void *, size_t>
   AllocateGPUHeap(size_t Length, size_t Alignment) {
     if (!Length)
@@ -169,6 +229,17 @@ public:
     assert(gpu_heap_offset_ < kGPUHeapSize);
     return {ptr_add(gpu_heap_, aligned), aligned};
   }
+
+  std::tuple<WMT::Buffer, uint64_t>
+  AllocateTempBuffer(size_t Size, size_t Alignment) {
+    assert(copy_temp_version_);
+    auto [block, offset] = copy_temp_allocator_.allocate(copy_temp_version_, copy_temp_version_ - 1, Size, Alignment);
+    return {block.buffer, offset};
+  }
+
+  IndirectComputeCommandData *EncodeIndirectComputeCommand(MTLD3D12CommandSignature *pCmdSig, MTLD3D12ComputePipelineState *pPSO, size_t MaxCount);
+
+  IndirectRenderCommandData *EncodeIndirectRenderCommand(MTLD3D12CommandSignature *pCmdSig, MTLD3D12GraphicsPipelineState *pPSO, size_t MaxCount);
 };
 
 } // namespace dxmt

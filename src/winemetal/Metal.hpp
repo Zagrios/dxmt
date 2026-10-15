@@ -284,6 +284,16 @@ public:
     data.set((void *)pixelBytes);
     return MTLTexture_replaceRegion(handle, origin, size, level, slice, data, bytesPerRow, bytesPerImage);
   }
+
+  void
+  getBytes(
+      WMTOrigin origin, WMTSize size, uint64_t level, uint64_t slice, void *pixelBytes, uint64_t bytesPerRow,
+      uint64_t bytesPerImage
+  ) {
+    WMTMemoryPointer data;
+    data.set((void *)pixelBytes);
+    return MTLTexture_getBytes(handle, origin, size, level, slice, data, bytesPerRow, bytesPerImage);
+  }
 };
 
 class Buffer : public Resource {
@@ -303,6 +313,19 @@ public:
     WMTConstMemoryPointer ptr;
     ptr.set(data);
     MTLBuffer_updateContents(handle, offset, ptr, length);
+  }
+};
+
+class Heap : public Allocation {
+public:
+  Reference<Buffer>
+  newBuffer(WMTBufferInfo &info, uint64_t offset = ~0ull) {
+    return Reference<Buffer>(MTLHeap_newBuffer(handle, &info, offset));
+  }
+
+  Reference<Texture>
+  newTexture(WMTTextureInfo &info, uint64_t offset = ~0ull) {
+    return Reference<Texture>(MTLHeap_newTexture(handle, &info, offset));
   }
 };
 
@@ -752,6 +775,10 @@ public:
   }
 };
 
+class IndirectCommandBuffer : public Resource {
+public:
+};
+
 class Device : public Object {
 public:
   uint64_t
@@ -835,6 +862,11 @@ public:
     return Reference<Library>(MTLDevice_newLibrary(handle, data, error.out_handle()));
   }
 
+  Reference<Library>
+  newLibraryWithSource(std::string_view view, Error &error) {
+    return Reference<Library>(MTLDevice_newLibraryWithSource(handle, view.data(), view.length(), error.out_handle()));
+  }
+
   Reference<ComputePipelineState>
   newComputePipelineState(const Function &compute_function, Error &error) {
     WMTComputePipelineInfo info;
@@ -845,6 +877,7 @@ public:
     info.binary_archives_for_lookup.set(nullptr);
     info.num_binary_archives_for_lookup = 0;
     info.fail_on_binary_archive_miss = false;
+    info.support_indirect_command_buffers = false;
     return Reference<ComputePipelineState>(MTLDevice_newComputePipelineState(handle, &info, error.out_handle()));
   }
 
@@ -858,6 +891,7 @@ public:
     info.binary_archives_for_lookup.set(nullptr);
     info.num_binary_archives_for_lookup = 0;
     info.fail_on_binary_archive_miss = false;
+    info.support_indirect_command_buffers = false;
     return Reference<ComputePipelineState>(MTLDevice_newComputePipelineState(handle, &info, error.out_handle()));
   }
 
@@ -894,6 +928,21 @@ public:
   Reference<ResidencySet>
   newResidencySet(uint64_t init_capacity, Error &error) {
     return Reference<ResidencySet>(MTLDevice_newResidencySet(handle, init_capacity, error.out_handle()));
+  }
+
+  Reference<Heap>
+  newHeap(const WMTHeapInfo &info) {
+    return Reference<Heap>(MTLDevice_newHeap(handle, &info));
+  }
+
+  WMTSizeAndAlign
+  heapBufferSizeAndAlign(uint64_t length, WMTResourceOptions options) {
+    return MTLDevice_heapBufferSizeAndAlign(handle, length, options);
+  }
+
+  WMTSizeAndAlign
+  heapTextureSizeAndAlign(WMTTextureInfo &info) {
+    return MTLDevice_heapTextureSizeAndAlign(handle, &info);
   }
 
   uint64_t
@@ -959,6 +1008,11 @@ public:
   Reference<CounterSampleBuffer>
   newCounterSampleBuffer(uint32_t sample_count, bool shared = true) {
     return Reference<CounterSampleBuffer>(MTLCounterSampleBuffer_newTimestampBuffer(handle, sample_count, shared));
+  }
+
+  Reference<IndirectCommandBuffer>
+  newIndirectCommandBuffer(WMTIndirectCommandBufferInfo &info, uint64_t max_count, WMTResourceOptions options) {
+    return Reference<IndirectCommandBuffer>(MTLDevice_newIndirectCommandBuffer(handle, &info, max_count, options));
   }
 };
 
@@ -1123,6 +1177,7 @@ InitializeRenderPipelineInfo(WMTRenderPipelineInfo &info) {
   info.binary_archives_for_lookup.set(nullptr);
   info.num_binary_archives_for_lookup = 0;
   info.fail_on_binary_archive_miss = false;
+  info.support_indirect_command_buffers = false;
 }
 
 inline void
@@ -1134,6 +1189,7 @@ InitializeComputePipelineInfo(WMTComputePipelineInfo &info) {
   info.fail_on_binary_archive_miss = false;
   info.tgsize_is_multiple_of_sgwidth = false;
   info.immutable_buffers = 0;
+  info.support_indirect_command_buffers = false;
 }
 
 inline void
@@ -1170,6 +1226,7 @@ InitializeMeshRenderPipelineInfo(WMTMeshRenderPipelineInfo &info) {
   info.binary_archives_for_lookup.set(nullptr);
   info.num_binary_archives_for_lookup = 0;
   info.fail_on_binary_archive_miss = false;
+  info.support_indirect_command_buffers = false;
 }
 
 inline void

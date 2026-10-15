@@ -28,6 +28,12 @@ enum class DirtyState {
   GraphicsRootSignature,
   Viewport,
   ScissorRect,
+  ComputeRootArguments,
+  ComputeRootSignature,
+  BlendFactor,
+  StencilRef,
+  GraphicsPipelineState,
+  ComputePipelineState,
 };
 
 enum class DrawCallStatus {
@@ -102,9 +108,6 @@ to_metal_primitive_type(D3D12_PRIMITIVE_TOPOLOGY topo, WMTPrimitiveType &primiti
   return true;
 }
 
-/* FIXME: it's not *public* */
-unsigned getPlanarCount(WMTPixelFormat format);
-
 // `Graphics`CommandList is a really confusing name
 class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12GraphicsCommandList> {
 
@@ -139,22 +142,27 @@ class MTLD3D12GraphicsCommandListImpl : public MTLD3D12DeviceChild<MTLD3D12Graph
   Com<MTLD3D12RootSignature, false> rootsig_graphics_;
   uint64_t rootarg_graphics_staging_[64];
 
+  Com<MTLD3D12ComputePipelineState, false> pso_compute_;
+  Com<MTLD3D12RootSignature, false> rootsig_compute_;
+  uint64_t rootarg_compute_staging_[64];
+
+  FLOAT blend_factor_[4];
+  UINT8 stencil_ref_;
+
 public:
   MTLD3D12GraphicsCommandListImpl(MTLD3D12Device *pDevice) : MTLD3D12DeviceChild<MTLD3D12GraphicsCommandList>(pDevice) {}
 
   ~MTLD3D12GraphicsCommandListImpl() {}
 
-  HRESULT
-  Initialize(ID3D12CommandAllocator *pAllocator, ID3D12PipelineState *pInitialPipelineState) {
-    auto allocator = static_cast<MTLD3D12CommandAllocatorImpl *>(pAllocator);
-
-    if (allocator_ != allocator)
-      allocator_ = allocator;
-
+  void
+  ResetState(ID3D12PipelineState *pInitialPipelineState) {
     pso_graphics_ = nullptr;
+    pso_compute_ = nullptr;
     if (auto pso = static_cast<MTLD3D12PipelineState *>(pInitialPipelineState)) {
       if (!pso->IsComputePipelineState)
         pso_graphics_ = static_cast<MTLD3D12GraphicsPipelineState *>(pInitialPipelineState);
+      else
+        pso_compute_ = static_cast<MTLD3D12ComputePipelineState *>(pInitialPipelineState);
     }
 
     num_rtvs = {};
@@ -169,8 +177,17 @@ public:
     num_scissors = {};
     memset(scissors, 0, sizeof(scissors));
 
+    blend_factor_[0] = 1.0f;
+    blend_factor_[1] = 1.0f;
+    blend_factor_[2] = 1.0f;
+    blend_factor_[3] = 1.0f;
+    stencil_ref_ = 0;
+
     rootsig_graphics_ = nullptr;
     memset(rootarg_graphics_staging_, 0, sizeof(rootarg_graphics_staging_));
+
+    rootsig_compute_ = nullptr;
+    memset(rootarg_compute_staging_, 0, sizeof(rootarg_compute_staging_));
 
     memset(vertex_buffers_.data(), 0, sizeof(vertex_buffers_));
 
@@ -180,6 +197,16 @@ public:
     index_offset = 0;
 
     dirty_state_.clrAll();
+  }
+
+  HRESULT
+  Initialize(ID3D12CommandAllocator *pAllocator, ID3D12PipelineState *pInitialPipelineState) {
+    auto allocator = static_cast<MTLD3D12CommandAllocatorImpl *>(pAllocator);
+
+    if (allocator_ != allocator)
+      allocator_ = allocator;
+
+    ResetState(pInitialPipelineState);
 
     encoder_count = std::numeric_limits<size_t>::max();
     return allocator_->StartRecord(&entry);
@@ -194,7 +221,8 @@ public:
     *ppvObject = nullptr;
 
     if (riid == __uuidof(IUnknown) || riid == __uuidof(ID3D12Object) || riid == __uuidof(ID3D12DeviceChild) ||
-        riid == __uuidof(ID3D12CommandList) || riid == __uuidof(ID3D12GraphicsCommandList)) {
+        riid == __uuidof(ID3D12CommandList) || riid == __uuidof(ID3D12GraphicsCommandList) ||
+        riid == __uuidof(ID3D12GraphicsCommandList1) || riid == __uuidof(ID3D12GraphicsCommandList2)) {
       *ppvObject = ref(this);
       return S_OK;
     }
@@ -225,7 +253,11 @@ public:
     return Initialize(pAllocator, pInitialState);
   };
 
-  void STDMETHODCALLTYPE ClearState(ID3D12PipelineState *pPipelineState) { IMPLEMENT_ME };
+  void STDMETHODCALLTYPE
+  ClearState(ID3D12PipelineState *pPipelineState) {
+    allocator_->InvalidateCurrentPass();
+    ResetState(pPipelineState);
+  };
 
   std::tuple<uint64_t, uint64_t>
   PopulateVertexBufferTable(uint32_t Count) {
@@ -257,21 +289,8 @@ public:
     return {offset, stride};
   }
 
-  void
-  EncodeVertexBuffers() {
-    auto [Offset, Stride] = PopulateVertexBufferTable(1);
-    if (!Stride)
-      return;
-
-    auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
-    cmd.type = WMTRenderCommandSetVertexBuffer;
-    cmd.buffer = allocator_->gpu_heap_buffer_;
-    cmd.offset = Offset;
-    cmd.index = SM50_BINDING_INDEX_VERTEX_BUFFER;
-  }
-
   DrawCallStatus
-  PreDraw() {
+  PreDraw(bool SkipResourceBinding = false) {
     /* No pipeline bound (never set, or SetPipelineState(NULL)): D3D12
      * leaves the draw undefined; drop it rather than encode a draw with
      * no render pipeline state, which segfaults inside the Metal
@@ -320,14 +339,14 @@ public:
         if (dsv_planar_flags & 1) {
           auto &rt = render->depth;
           rt.attachment = AttachmentDesc.Texture->view(AttachmentDesc.View);
-          rt.depth_plane = 0;
+          rt.depth_plane = 0; // DSV cannot be 3D
           rt.load_action = WMTLoadActionLoad;
           rt.store_action = WMTStoreActionStore;
         }
         if (dsv_planar_flags & 2) {
           auto &rt = render->stencil;
           rt.attachment = AttachmentDesc.Texture->view(AttachmentDesc.View);
-          rt.depth_plane = AttachmentDesc.DepthPlane;
+          rt.depth_plane = 0; // DSV cannot be 3D
           rt.load_action = WMTLoadActionLoad;
           rt.store_action = WMTStoreActionStore;
         }
@@ -341,25 +360,57 @@ public:
       render->render_target_height = render_target_height;
       render->render_target_array_length = render_target_array_length;
       if (effective_rtvs == 0) {
-        IMPLEMENT_ME
-        // render->default_raster_sample_count = std::max(1u, forced_sample_count);
+        render->default_raster_sample_count = std::max(1u, pso_graphics_->forced_sample_count);
       }
 
-      if (pso_graphics_) {
-        UpdateGraphicsPSO(pso_graphics_.ptr());
-      }
       dirty_state_.set(DirtyState::VertexBuffer, DirtyState::GraphicsRootArguments, DirtyState::GraphicsRootSignature);
       dirty_state_.set(DirtyState::Viewport, DirtyState::ScissorRect);
+      dirty_state_.set(DirtyState::BlendFactor, DirtyState::StencilRef);
+      dirty_state_.set(DirtyState::GraphicsPipelineState);
+    }
+
+    if (!pso_graphics_)
+      return DrawCallStatus::Invalid;
+
+    if (dirty_state_.test(DirtyState::GraphicsPipelineState)) {
+      auto &cmd_setpso = allocator_->EncodeRenderCommand<wmtcmd_render_setpso>();
+      cmd_setpso.type = WMTRenderCommandSetPSO;
+      cmd_setpso.pso = pso_graphics_->pso;
+
+      auto &cmd_setdsso = allocator_->EncodeRenderCommand<wmtcmd_render_setdepthstencilstate>();
+      cmd_setdsso.type = WMTRenderCommandSetDepthStencilState;
+      cmd_setdsso.depth_stencil_state = pso_graphics_->GetDepthStencilState(
+        static_cast<RenderEncoderData *>(allocator_->encoder_current)->dsv_planar_flags,
+        static_cast<RenderEncoderData *>(allocator_->encoder_current)->dsv_readonly_flags
+      );
+
+      auto &cmd_setrs = allocator_->EncodeRenderCommand<wmtcmd_render_setrasterizerstate>();
+      cmd_setrs.type = WMTRenderCommandSetRasterizerState;
+      cmd_setrs.cull_mode = pso_graphics_->cull_mode;
+      cmd_setrs.depth_clip_mode = pso_graphics_->depth_clip_mode;
+      cmd_setrs.fill_mode = pso_graphics_->fill_mode;
+      cmd_setrs.depth_bias = pso_graphics_->depth_bias;
+      cmd_setrs.depth_bias_clamp = pso_graphics_->depth_bias_clamp;
+      cmd_setrs.scole_scale = pso_graphics_->scole_scale;
+      cmd_setrs.winding = pso_graphics_->winding;
+
+      dirty_state_.clr(DirtyState::GraphicsPipelineState);
     }
     if (dirty_state_.test(DirtyState::VertexBuffer)) {
-      EncodeVertexBuffers();
+      auto [Offset, Stride] = PopulateVertexBufferTable(1);
+      if (Stride) {
+        auto &cmd_vsvb = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
+        cmd_vsvb.type = WMTRenderCommandSetVertexBuffer;
+        cmd_vsvb.buffer = allocator_->gpu_heap_buffer_;
+        cmd_vsvb.offset = Offset;
+        cmd_vsvb.index = SM50_BINDING_INDEX_VERTEX_BUFFER;
+      }
       dirty_state_.clr(DirtyState::VertexBuffer);
     }
 
-    if (dirty_state_.test(DirtyState::GraphicsRootArguments)) {
+    if (dirty_state_.test(DirtyState::GraphicsRootArguments) && !SkipResourceBinding) {
       if (rootsig_graphics_) {
-        auto [Ptr, Offset] = allocator_->AllocateGPUHeap(sizeof(uint64_t) * rootsig_graphics_->UploadQwords, 64);
-        memcpy(Ptr, rootarg_graphics_staging_, rootsig_graphics_->UploadQwords * sizeof(uint64_t));
+        auto Offset = EncodeRootArgument(rootsig_graphics_.ptr(), rootarg_graphics_staging_);
         auto &cmd_vsargbuf = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
         cmd_vsargbuf.type = WMTRenderCommandSetVertexBuffer;
         cmd_vsargbuf.buffer = allocator_->gpu_heap_buffer_;
@@ -374,11 +425,9 @@ public:
       dirty_state_.clr(DirtyState::GraphicsRootArguments);
     }
 
-    if (dirty_state_.test(DirtyState::GraphicsRootSignature)) {
+    if (dirty_state_.test(DirtyState::GraphicsRootSignature) && !SkipResourceBinding) {
       if (rootsig_graphics_) {
-        auto static_sampler_encode_size = sizeof(uint64_t) * rootsig_graphics_->NumStaticSamplers * 4;
-        auto [Ptr, Offset] = allocator_->AllocateGPUHeap(static_sampler_encode_size, 64);
-        memcpy(Ptr, rootsig_graphics_->EncodedStaticSamplers, static_sampler_encode_size);
+        auto Offset = EncodeStaticSamplers(rootsig_graphics_.ptr());
         auto &cmd_vsargbuf = allocator_->EncodeRenderCommand<wmtcmd_render_setbuffer>();
         cmd_vsargbuf.type = WMTRenderCommandSetVertexBuffer;
         cmd_vsargbuf.buffer = allocator_->gpu_heap_buffer_;
@@ -427,6 +476,24 @@ public:
       cmd.rect_count = num_viewports;
       dirty_state_.clr(DirtyState::ScissorRect);
     }
+
+    if (dirty_state_.test(DirtyState::BlendFactor)) {
+      auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setblendcolor>();
+      cmd.type = WMTRenderCommandSetBlendFactor;
+      cmd.red = blend_factor_[0];
+      cmd.green = blend_factor_[1];
+      cmd.blue = blend_factor_[2];
+      cmd.alpha = blend_factor_[3];
+      dirty_state_.clr(DirtyState::BlendFactor);
+    }
+
+    if (dirty_state_.test(DirtyState::StencilRef)) {
+      auto &cmd = allocator_->EncodeRenderCommand<wmtcmd_render_setstencilref>();
+      cmd.type = WMTRenderCommandSetStencilRef;
+      cmd.stencil_ref = stencil_ref_;
+      dirty_state_.clr(DirtyState::StencilRef);
+    }
+
     return DrawCallStatus::Ordinary;
   }
 
@@ -473,7 +540,85 @@ public:
     cmd_draw.base_instance = StartInstanceLocation;
   };
 
-  void STDMETHODCALLTYPE Dispatch(UINT X, UINT Y, UINT Z) { IMPLEMENT_ME };
+  uint64_t
+  EncodeRootArgument(MTLD3D12RootSignature *pRootSig, uint64_t const pStaging[64], UINT Count = 1) {
+    auto [Ptr, Offset] = allocator_->AllocateGPUHeap(sizeof(uint64_t) * pRootSig->UploadQwords * Count, 64);
+    for (unsigned i = 0; i < Count; i++)
+      memcpy(
+          reinterpret_cast<uint64_t *>(Ptr) + i * pRootSig->UploadQwords, pStaging,
+          pRootSig->UploadQwords * sizeof(uint64_t)
+      );
+    return Offset;
+  }
+
+  uint64_t
+  EncodeStaticSamplers(MTLD3D12RootSignature *pRootSig) {
+    auto static_sampler_encode_size = sizeof(uint64_t) * pRootSig->NumStaticSamplers * 4;
+    auto [Ptr, Offset] = allocator_->AllocateGPUHeap(static_sampler_encode_size, 64);
+    memcpy(Ptr, pRootSig->EncodedStaticSamplers, static_sampler_encode_size);
+    return Offset;
+  }
+
+  bool
+  PreDispatch(bool SkipResourceBinding = false) {
+    if (!allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Compute) {
+      allocator_->InvalidateCurrentPass();
+      auto compute = allocator_->AllocatePass<ComputeEncoderData>();
+      compute->type = EncoderType::Compute;
+      compute->cmd_head.type = WMTComputeCommandNop;
+      compute->cmd_head.next.set(0);
+      compute->cmd_tail = (wmtcmd_base *)&compute->cmd_head;
+      dirty_state_.set(DirtyState::ComputeRootArguments, DirtyState::ComputeRootSignature);
+      dirty_state_.set(DirtyState::ComputePipelineState);
+    }
+
+    if (!pso_compute_)
+        return false;
+
+    if (dirty_state_.test(DirtyState::ComputePipelineState)) {
+      auto &cmd_setpso = allocator_->EncodeComputeCommand<wmtcmd_compute_setpso>();
+      cmd_setpso.type = WMTComputeCommandSetPSO;
+      cmd_setpso.pso = pso_compute_->pso;
+      cmd_setpso.threadgroup_size = pso_compute_->threadgroup_size;
+      dirty_state_.clr(DirtyState::ComputePipelineState);
+    }
+
+    if (dirty_state_.test(DirtyState::ComputeRootArguments) && !SkipResourceBinding) {
+      if (rootsig_compute_) {
+        auto Offset = EncodeRootArgument(rootsig_compute_.ptr(), rootarg_compute_staging_);
+        auto &cmd_argbuf = allocator_->EncodeComputeCommand<wmtcmd_compute_setbuffer>();
+        cmd_argbuf.type = WMTComputeCommandSetBuffer;
+        cmd_argbuf.buffer = allocator_->gpu_heap_buffer_;
+        cmd_argbuf.offset = Offset;
+        cmd_argbuf.index = SM50_BINDING_INDEX_ROOT_ARGUMENTS;
+      }
+      dirty_state_.clr(DirtyState::ComputeRootArguments);
+    }
+
+    if (dirty_state_.test(DirtyState::ComputeRootSignature) && !SkipResourceBinding) {
+      if (rootsig_compute_) {
+        auto Offset = EncodeStaticSamplers(rootsig_compute_.ptr());
+        auto &cmd_argbuf = allocator_->EncodeComputeCommand<wmtcmd_compute_setbuffer>();
+        cmd_argbuf.type = WMTComputeCommandSetBuffer;
+        cmd_argbuf.buffer = allocator_->gpu_heap_buffer_;
+        cmd_argbuf.offset = Offset;
+        cmd_argbuf.index = SM50_BINDING_INDEX_STATIC_SAMPLERS;
+      }
+      dirty_state_.clr(DirtyState::ComputeRootSignature);
+    }
+
+    return true;
+  }
+
+  void STDMETHODCALLTYPE
+  Dispatch(UINT X, UINT Y, UINT Z) {
+    if (!PreDispatch())
+      return;
+
+    auto &cmd_dispatch = allocator_->EncodeComputeCommand<wmtcmd_compute_dispatch>();
+    cmd_dispatch.type = WMTComputeCommandDispatch;
+    cmd_dispatch.size = {X, Y, Z};
+  };
 
   bool
   PreBlit() {
@@ -516,88 +661,190 @@ public:
     if (!PreBlit())
       return;
 
+    auto src_desc = pSrc->pResource->GetDesc();
+    auto dst_desc = pDst->pResource->GetDesc();
+    uint32_t src_level = 0, src_slice = 0, src_planar = 0;
+    uint32_t dst_level = 0, dst_slice = 0, dst_planar = 0;
+    D3D12_BOX src_box, full_src_box;
+
+    if (pSrc->Type == D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT) {
+      full_src_box = {
+          0, 0, 0,
+          pSrc->PlacedFootprint.Footprint.Width,
+          pSrc->PlacedFootprint.Footprint.Height,
+          pSrc->PlacedFootprint.Footprint.Depth
+      };
+    } else {
+      DecomposeSubresource(src_desc, pSrc->SubresourceIndex, &src_level, &src_slice, &src_planar);
+      full_src_box = GetResourceExtent(src_desc, src_level);
+    }
+    src_box = pSrcBox ? *pSrcBox : full_src_box;
+
+    // discard invalid & empty box
+    if (src_box.left >= src_box.right || src_box.front >= src_box.back || src_box.top >= src_box.bottom)
+      return;
+
     if (pDst->Type == D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX) {
       auto &dst = static_cast<MTLD3D12Resource *>(pDst->pResource)->texture;
       if (!dst)
         return;
 
-      auto dst_planar_count = getPlanarCount(dst->pixelFormat());
+      DecomposeSubresource(dst_desc, pDst->SubresourceIndex, &dst_level, &dst_slice, &dst_planar);
+
+      MTL_DXGI_FORMAT_DESC dst_format;
+      if (FAILED(MTLQueryDXGIFormat(device_->GetMTLDevice(), dst_desc.Format, dst_format))) {
+        WARN("CopyTextureRegion: unsupported format ", dst_desc.Format);
+        return;
+      }
+      auto dst_planar_count = dst_format.PlanarCount;
 
       if (pSrc->Type == D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT) {
         auto &src = static_cast<MTLD3D12Resource *>(pSrc->pResource)->buffer;
         if (!src)
           return;
-        if (pSrcBox)
-          IMPLEMENT_ME
+
+        MTL_DXGI_FORMAT_DESC src_format;
+        if (FAILED(MTLQueryDXGIFormat(device_->GetMTLDevice(), pSrc->PlacedFootprint.Footprint.Format, src_format))) {
+          WARN("CopyTextureRegion: unsupported format ", pSrc->PlacedFootprint.Footprint.Format);
+          return;
+        }
+
+        auto block_width = src_format.Flag & MTL_DXGI_FORMAT_BC ? 4 : 1;
+        auto src_depth_pitch = dst->textureType() == WMTTextureType3D
+                                   ? (pSrc->PlacedFootprint.Footprint.Height / block_width) * pSrc->PlacedFootprint.Footprint.RowPitch
+                                   : 0;
 
         auto &cmd_cp = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_texture_withblitoption>();
-        cmd_cp.type = WMTBlitCommandCopyFromBufferToTexture;
+        cmd_cp.type = WMTBlitCommandCopyFromBufferToTextureWithBlitOption;
         cmd_cp.src = src->current()->buffer();
-        cmd_cp.src_offset = pSrc->PlacedFootprint.Offset;
+        cmd_cp.src_offset = pSrc->PlacedFootprint.Offset + (src_box.left / block_width) * src_format.BytesPerTexel +
+                            (src_box.top / block_width) * pSrc->PlacedFootprint.Footprint.RowPitch + src_box.front * src_depth_pitch;
         cmd_cp.bytes_per_row = pSrc->PlacedFootprint.Footprint.RowPitch;
-        cmd_cp.bytes_per_image = 0;
-        cmd_cp.size = {
-            pSrc->PlacedFootprint.Footprint.Width, pSrc->PlacedFootprint.Footprint.Height,
-            pSrc->PlacedFootprint.Footprint.Depth
-        };
+        cmd_cp.bytes_per_image = src_depth_pitch;
+        cmd_cp.size = {src_box.right - src_box.left, src_box.bottom - src_box.top, src_box.back - src_box.front};
         cmd_cp.dst = dst->current()->texture();
-        cmd_cp.level = pDst->SubresourceIndex % dst->miplevelCount();
-        cmd_cp.slice = pDst->SubresourceIndex / dst->miplevelCount();
-        cmd_cp.options = dst_planar_count ? (pSrc->SubresourceIndex ? WMTBlitOptionStencilFromDepthStencil
-                                                                    : WMTBlitOptionDepthFromDepthStencil)
-                                          : WMTBlitOptionNone;
+        cmd_cp.level = dst_level;
+        cmd_cp.slice = dst_slice;
+        cmd_cp.options = (dst_planar_count > 1)
+                             ? (dst_planar ? WMTBlitOptionStencilFromDepthStencil : WMTBlitOptionDepthFromDepthStencil)
+                             : WMTBlitOptionNone;
         cmd_cp.origin = {DstX, DstY, DstZ};
       } else {
         auto &src = static_cast<MTLD3D12Resource *>(pSrc->pResource)->texture;
         if (!src)
           return;
-        auto src_planar_count = getPlanarCount(src->pixelFormat());
-        if (!pSrcBox)
-          IMPLEMENT_ME
+
+        MTL_DXGI_FORMAT_DESC src_format;
+        if (FAILED(MTLQueryDXGIFormat(device_->GetMTLDevice(), src_desc.Format, src_format))) {
+          WARN("CopyTextureRegion: unsupported format ", src_desc.Format);
+          return;
+        }
+        auto src_planar_count = src_format.PlanarCount;
 
         // copy between depth-stencil texture is tricky
-        if (dst_planar_count > 1 || src_planar_count > 1)
-          IMPLEMENT_ME
+        if (dst_planar_count > 1 || src_planar_count > 1) {
+          // in this path, one/both of dst/src would be depth-stencil texture
+
+          if (dst_planar_count > 1 && src_planar_count > 1 && dst_planar != src_planar) {
+            WARN("CopyTextureRegion: unmatched planar"); // just in case
+            return;
+          }
+
+          auto texel_size = (dst_planar == 1 || src_planar == 1) ? 1 : 4;
+          auto width = src_box.right - src_box.left;
+          auto height = src_box.bottom - src_box.top;
+          auto bytes_per_row = align(width * texel_size, 256);
+          auto bytes_per_image = bytes_per_row * height;
+
+          auto [temp_buffer, temp_buffer_offset] = allocator_->AllocateTempBuffer(bytes_per_image, 256);
+
+          auto &cmd_to_tmp = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_texture_to_buffer_withblitoption>();
+          cmd_to_tmp.type = WMTBlitCommandCopyFromTextureToBufferWithBlitOption;
+          cmd_to_tmp.src = src->current()->texture();
+          cmd_to_tmp.level = src_level;
+          cmd_to_tmp.slice = src_slice;
+          cmd_to_tmp.origin = {src_box.left, src_box.top, src_box.front};
+          cmd_to_tmp.size = {width, height, src_box.back - src_box.front};
+          cmd_to_tmp.dst = temp_buffer;
+          cmd_to_tmp.offset = temp_buffer_offset;
+          cmd_to_tmp.bytes_per_image = 0; // DSV cannot be 3D
+          cmd_to_tmp.bytes_per_row = bytes_per_row;
+          cmd_to_tmp.options = (src_planar_count > 1) ? (src_planar ? WMTBlitOptionStencilFromDepthStencil
+                                                                    : WMTBlitOptionDepthFromDepthStencil)
+                                                      : WMTBlitOptionNone;
+
+          auto &cmd_to_tex = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_texture_withblitoption>();
+          cmd_to_tex.type = WMTBlitCommandCopyFromBufferToTextureWithBlitOption;
+          cmd_to_tex.src = temp_buffer;
+          cmd_to_tex.src_offset = temp_buffer_offset;
+          cmd_to_tex.bytes_per_image = 0; // DSV cannot be 3D
+          cmd_to_tex.bytes_per_row = bytes_per_row;
+          cmd_to_tex.dst = dst->current()->texture();
+          cmd_to_tex.level = dst_level;
+          cmd_to_tex.slice = dst_slice;
+          cmd_to_tex.origin = {DstX, DstY, DstZ};
+          cmd_to_tex.size = {src_box.right - src_box.left, src_box.bottom - src_box.top, src_box.back - src_box.front};
+          cmd_to_tex.options = (dst_planar_count > 1) ? (dst_planar ? WMTBlitOptionStencilFromDepthStencil
+                                                                    : WMTBlitOptionDepthFromDepthStencil)
+                                                      : WMTBlitOptionNone;
+          return;
+        }
 
         auto &cmd_cp = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_texture_to_texture>();
         cmd_cp.type = WMTBlitCommandCopyFromTextureToTexture;
         cmd_cp.src = src->current()->texture();
-        cmd_cp.src_level = pSrc->SubresourceIndex % src->miplevelCount();
-        cmd_cp.src_slice = pSrc->SubresourceIndex / src->miplevelCount();
-        cmd_cp.src_origin = {pSrcBox->left, pSrcBox->top, pSrcBox->front};
-        cmd_cp.src_size = {
-            pSrcBox->right - pSrcBox->left, pSrcBox->bottom - pSrcBox->top, pSrcBox->back - pSrcBox->front
-        };
+        cmd_cp.src_level = src_level;
+        cmd_cp.src_slice = src_slice;
+        cmd_cp.src_origin = {src_box.left, src_box.top, src_box.front};
+        cmd_cp.src_size = {src_box.right - src_box.left, src_box.bottom - src_box.top, src_box.back - src_box.front};
         cmd_cp.dst = dst->current()->texture();
-        cmd_cp.dst_level = pDst->SubresourceIndex % dst->miplevelCount();
-        cmd_cp.dst_slice = pDst->SubresourceIndex / dst->miplevelCount();
+        cmd_cp.dst_level = dst_level;
+        cmd_cp.dst_slice = dst_slice;
         cmd_cp.dst_origin = {DstX, DstY, DstZ};
       }
     } else if (pDst->Type == D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT) {
       auto &dst = static_cast<MTLD3D12Resource *>(pDst->pResource)->buffer;
       if (!dst)
         return;
-      if (pSrcBox)
-        IMPLEMENT_ME
+
+      MTL_DXGI_FORMAT_DESC dst_format;
+      if (FAILED(MTLQueryDXGIFormat(device_->GetMTLDevice(), pDst->PlacedFootprint.Footprint.Format, dst_format))) {
+        WARN("CopyTextureRegion: unsupported format ", pDst->PlacedFootprint.Footprint.Format);
+        return;
+      }
+
       if (pSrc->Type == D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX) {
         auto &src = static_cast<MTLD3D12Resource *>(pSrc->pResource)->texture;
         if (!src)
           return;
 
-        auto &cmd_cp = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_texture_to_buffer>();
-        cmd_cp.type = WMTBlitCommandCopyFromTextureToBuffer;
+        MTL_DXGI_FORMAT_DESC src_format;
+        if (FAILED(MTLQueryDXGIFormat(device_->GetMTLDevice(), src_desc.Format, src_format))) {
+          WARN("CopyTextureRegion: unsupported format ", src_desc.Format);
+          return;
+        }
+        auto src_planar_count = src_format.PlanarCount;
+
+        auto block_width = dst_format.Flag & MTL_DXGI_FORMAT_BC ? 4 : 1;
+        auto dst_depth_pitch = src->textureType() == WMTTextureType3D
+                                   ? (pDst->PlacedFootprint.Footprint.Height / block_width) * pDst->PlacedFootprint.Footprint.RowPitch
+                                   : 0;
+
+        auto &cmd_cp = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_texture_to_buffer_withblitoption>();
+        cmd_cp.type = WMTBlitCommandCopyFromTextureToBufferWithBlitOption;
         cmd_cp.src = src->current()->texture();
-        cmd_cp.level = pSrc->SubresourceIndex % src->miplevelCount();
-        cmd_cp.slice = pSrc->SubresourceIndex / src->miplevelCount();
-        cmd_cp.origin = {0, 0, 0};
-        cmd_cp.size = {
-            pDst->PlacedFootprint.Footprint.Width, pDst->PlacedFootprint.Footprint.Height,
-            pDst->PlacedFootprint.Footprint.Depth
-        };
+        cmd_cp.level = src_level;
+        cmd_cp.slice = src_slice;
+        cmd_cp.origin = {src_box.left, src_box.top, src_box.front};
+        cmd_cp.size = {src_box.right - src_box.left, src_box.bottom - src_box.top, src_box.back - src_box.front};
         cmd_cp.dst = dst->current()->buffer();
-        cmd_cp.offset = pDst->PlacedFootprint.Offset;
+        cmd_cp.offset = pDst->PlacedFootprint.Offset + (DstX / block_width) * dst_format.BytesPerTexel +
+                        (DstY / block_width) * pDst->PlacedFootprint.Footprint.RowPitch + DstZ * dst_depth_pitch;
         cmd_cp.bytes_per_row = pDst->PlacedFootprint.Footprint.RowPitch;
-        cmd_cp.bytes_per_image = 0;
+        cmd_cp.bytes_per_image = dst_depth_pitch;
+        cmd_cp.options = (src_planar_count > 1)
+                             ? (src_planar ? WMTBlitOptionStencilFromDepthStencil : WMTBlitOptionDepthFromDepthStencil)
+                             : WMTBlitOptionNone;
       } else {
         // so it is buffer to buffer copy?
         IMPLEMENT_ME
@@ -605,7 +852,43 @@ public:
     }
   };
 
-  void STDMETHODCALLTYPE CopyResource(ID3D12Resource *pDstResource, ID3D12Resource *pSrcResource) { IMPLEMENT_ME };
+  void STDMETHODCALLTYPE
+  CopyResource(ID3D12Resource *pDstResource, ID3D12Resource *pSrcResource) {
+    auto *pDst = static_cast<MTLD3D12Resource *>(pDstResource);
+    auto *pSrc = static_cast<MTLD3D12Resource *>(pSrcResource);
+    if (!pDst || !pSrc || (pDst == pSrc))
+      return;
+
+    auto DstDesc = pDst->GetDesc();
+    auto SrcDesc = pSrc->GetDesc();
+    if (DstDesc.Dimension != SrcDesc.Dimension)
+      return;
+
+    if (!PreBlit())
+      return;
+
+    if (DstDesc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER) {
+      auto &cmd_cp = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_from_buffer_to_buffer>();
+      cmd_cp.type = WMTBlitCommandCopyFromBufferToBuffer;
+      cmd_cp.copy_length = SrcDesc.Width;
+      cmd_cp.src = pSrc->buffer->current()->buffer();
+      cmd_cp.src_offset = 0;
+      cmd_cp.dst = pDst->buffer->current()->buffer();
+      cmd_cp.dst_offset = 0;
+      return;
+    }
+
+    // TODO: handle reinterpret copy
+    if (pDst->texture->pixelFormat() != pSrc->texture->pixelFormat()) {
+      WARN("CopyResource: TODO: reinterpret copy");
+      return;
+    }
+
+    auto &cmd_cp = allocator_->EncodeBlitCommand<wmtcmd_blit_copy_texture>();
+    cmd_cp.type = WMTBlitCommandCopyTexture;
+    cmd_cp.src = pSrc->texture->current()->texture();
+    cmd_cp.dst = pDst->texture->current()->texture();
+  };
 
   void STDMETHODCALLTYPE CopyTiles(
       ID3D12Resource *tiled_resource, const D3D12_TILED_RESOURCE_COORDINATE *tile_region_start_coordinate,
@@ -619,7 +902,52 @@ public:
       ID3D12Resource *pDstResource, UINT DstSubresource, ID3D12Resource *pSrcResource, UINT SrcSubresource,
       DXGI_FORMAT Format
   ) {
-    IMPLEMENT_ME
+    auto *pDst = static_cast<MTLD3D12Resource *>(pDstResource);
+    auto *pSrc = static_cast<MTLD3D12Resource *>(pSrcResource);
+
+    if (!pDst->texture || !pSrc->texture)
+      return;
+
+    auto DstMips = pDst->texture->miplevelCount();
+    auto DstLevel = DstSubresource % DstMips;
+    auto DstSlice = DstSubresource / DstMips;
+
+    allocator_->InvalidateCurrentPass();
+    auto resolve = allocator_->AllocatePass<ResolveEncoderData>();
+    resolve->type = EncoderType::Resolve;
+
+    MTL_DXGI_FORMAT_DESC format_desc;
+    if (FAILED(MTLQueryDXGIFormat(device_->GetMTLDevice(), Format, format_desc))) {
+      ERR("ResolveSubresource: invalid format ", Format);
+      return;
+    }
+    {
+      auto format = format_desc.PixelFormat;
+      TextureViewDescriptor src_desc;
+      auto &src = pSrc->texture;
+      auto &dst = pDst->texture;
+      src_desc.format = format;
+      src_desc.type = src->textureType();
+      src_desc.arraySize = 1;
+      src_desc.firstArraySlice = SrcSubresource; // src must be a MS(Array) texture which has exactly 1 mipmap level
+      src_desc.miplevelCount = 1;
+      src_desc.firstMiplevel = 0;
+
+      TextureViewDescriptor dst_desc;
+      dst_desc.format = format;
+      dst_desc.type = WMTTextureType2D;
+      dst_desc.arraySize = 1;
+      dst_desc.firstArraySlice = DstSlice;
+      dst_desc.miplevelCount = 1;
+      dst_desc.firstMiplevel = DstLevel;
+
+      auto src_view = src->createView(src_desc);
+      auto dst_view = dst->createView(dst_desc);
+
+      resolve->src = src->view(src_view);
+      resolve->dst = dst->view(dst_view);
+    }
+    allocator_->InvalidateCurrentPass();
   };
 
   void STDMETHODCALLTYPE
@@ -649,47 +977,53 @@ public:
     dirty_state_.set(DirtyState::ScissorRect);
   };
 
-  void STDMETHODCALLTYPE OMSetBlendFactor(const FLOAT BlendFactors[4]) { IMPLEMENT_ME };
+  void STDMETHODCALLTYPE
+  OMSetBlendFactor(const FLOAT BlendFactors[4]) {
+    if (BlendFactors) {
+      memcpy(blend_factor_, BlendFactors, std::size(blend_factor_) * sizeof(blend_factor_[0]));
+    } else {
+      blend_factor_[0] = 1.0f;
+      blend_factor_[1] = 1.0f;
+      blend_factor_[2] = 1.0f;
+      blend_factor_[3] = 1.0f;
+    }
+    dirty_state_.set(DirtyState::BlendFactor);
+  };
 
-  void STDMETHODCALLTYPE OMSetStencilRef(UINT StencilRef) { IMPLEMENT_ME };
-
-  void
-  UpdateGraphicsPSO(MTLD3D12GraphicsPipelineState *pso_graphics) {
-    auto &cmd_setpso = allocator_->EncodeRenderCommand<wmtcmd_render_setpso>();
-    cmd_setpso.type = WMTRenderCommandSetPSO;
-    cmd_setpso.pso = pso_graphics->pso;
-
-    auto &cmd_setdsso = allocator_->EncodeRenderCommand<wmtcmd_render_setdsso>();
-    cmd_setdsso.type = WMTRenderCommandSetDSSO;
-    cmd_setdsso.dsso = pso_graphics->dsso;
-    cmd_setdsso.stencil_ref = 0; /* FIXME */
-
-    auto &cmd_setrs = allocator_->EncodeRenderCommand<wmtcmd_render_setrasterizerstate>();
-    cmd_setrs.type = WMTRenderCommandSetRasterizerState;
-    cmd_setrs.cull_mode = pso_graphics->cull_mode;
-    cmd_setrs.depth_clip_mode = pso_graphics->depth_clip_mode;
-    cmd_setrs.fill_mode = pso_graphics->fill_mode;
-    cmd_setrs.depth_bias = pso_graphics->depth_bias;
-    cmd_setrs.depth_bias_clamp = pso_graphics->depth_bias_clamp;
-    cmd_setrs.scole_scale = pso_graphics->scole_scale;
-    cmd_setrs.winding = pso_graphics->winding;
-  }
+  void STDMETHODCALLTYPE
+  OMSetStencilRef(UINT StencilRef) {
+    if (stencil_ref_ == (UINT8)StencilRef)
+      return;
+    stencil_ref_ = (UINT8)StencilRef;
+    dirty_state_.set(DirtyState::StencilRef);
+  };
 
   void STDMETHODCALLTYPE
   SetPipelineState(ID3D12PipelineState *pPSO) {
     if (!pPSO) {
       pso_graphics_ = nullptr;
+      pso_compute_ = nullptr;
+      dirty_state_.set(DirtyState::GraphicsPipelineState, DirtyState::ComputePipelineState);
       return;
     }
+
+    auto pso = static_cast<MTLD3D12PipelineState *>(pPSO);
+    if (pso->IsComputePipelineState) {
+      auto compute_pso = static_cast<MTLD3D12ComputePipelineState *>(pPSO);
+      if (pso_compute_.ptr() == compute_pso)
+        return;
+      pso_compute_ = compute_pso;
+      pso_graphics_ = nullptr;
+      dirty_state_.set(DirtyState::GraphicsPipelineState, DirtyState::ComputePipelineState);
+      return;
+    }
+
     auto graphics_pso = static_cast<MTLD3D12GraphicsPipelineState *>(pPSO);
     if (pso_graphics_.ptr() == graphics_pso)
       return;
     pso_graphics_ = graphics_pso;
-    if (!allocator_->encoder_current || allocator_->encoder_current->type != EncoderType::Render)
-      return;
-
-    UpdateGraphicsPSO(graphics_pso);
-    dirty_state_.set(DirtyState::VertexBuffer);
+    pso_compute_ = nullptr;
+    dirty_state_.set(DirtyState::GraphicsPipelineState, DirtyState::ComputePipelineState, DirtyState::VertexBuffer);
   };
 
   void STDMETHODCALLTYPE ResourceBarrier(UINT Count, const D3D12_RESOURCE_BARRIER *barriers) {
@@ -703,7 +1037,18 @@ public:
     // no need to do anything here because because we encode the full descriptor table address in root argument
   };
 
-  void STDMETHODCALLTYPE SetComputeRootSignature(ID3D12RootSignature *pRootSignature) { IMPLEMENT_ME };
+  void STDMETHODCALLTYPE
+  SetComputeRootSignature(ID3D12RootSignature *pRootSignature) {
+    if (rootsig_compute_.ptr() == pRootSignature)
+      return;
+    if (pRootSignature) {
+      rootsig_compute_ = static_cast<MTLD3D12RootSignature *>(pRootSignature);
+      assert(rootsig_compute_->UploadQwords < std::size(rootarg_compute_staging_));
+    } else {
+      rootsig_compute_ = nullptr;
+    }
+    dirty_state_.set(DirtyState::ComputeRootArguments, DirtyState::ComputeRootSignature);
+  };
 
   void STDMETHODCALLTYPE
   SetGraphicsRootSignature(ID3D12RootSignature *pRootSignature) {
@@ -719,7 +1064,12 @@ public:
   };
 
   void STDMETHODCALLTYPE SetComputeRootDescriptorTable(UINT Index, D3D12_GPU_DESCRIPTOR_HANDLE BaseDescriptor) {
-    IMPLEMENT_ME
+    if (!rootsig_compute_)
+      return;
+    if (Index > rootsig_compute_->ParameterSlots)
+      return;
+    rootarg_compute_staging_[rootsig_compute_->SlotQwordOffsets[Index]] = BaseDescriptor.ptr;
+    dirty_state_.set(DirtyState::ComputeRootArguments);
   };
 
   void STDMETHODCALLTYPE
@@ -732,7 +1082,15 @@ public:
     dirty_state_.set(DirtyState::GraphicsRootArguments);
   };
 
-  void STDMETHODCALLTYPE SetComputeRoot32BitConstant(UINT Index, UINT Data, UINT DstOffset) { IMPLEMENT_ME };
+  void STDMETHODCALLTYPE SetComputeRoot32BitConstant(UINT Index, UINT Data, UINT DstOffset) {
+    if (!rootsig_compute_)
+      return;
+    if (Index > rootsig_compute_->ParameterSlots)
+      return;
+    auto dst = reinterpret_cast<uint32_t *>(rootarg_compute_staging_ + rootsig_compute_->SlotQwordOffsets[Index]);
+    dst[DstOffset] = Data;
+    dirty_state_.set(DirtyState::ComputeRootArguments);
+  };
 
   void STDMETHODCALLTYPE
   SetGraphicsRoot32BitConstant(UINT Index, UINT Data, UINT DstOffset) {
@@ -747,7 +1105,16 @@ public:
 
   void STDMETHODCALLTYPE
   SetComputeRoot32BitConstants(UINT Index, UINT ConstantCount, const void *pData, UINT DstOffset) {
-    IMPLEMENT_ME
+    if (!rootsig_compute_)
+      return;
+    if (Index > rootsig_compute_->ParameterSlots)
+      return;
+    auto src = reinterpret_cast<const uint32_t *>(pData);
+    auto dst = reinterpret_cast<uint32_t *>(rootarg_compute_staging_ + rootsig_compute_->SlotQwordOffsets[Index]);
+    for (unsigned i = 0; i < ConstantCount; i++) {
+      dst[i + DstOffset] = src[i];
+    }
+    dirty_state_.set(DirtyState::ComputeRootArguments);
   };
 
   void STDMETHODCALLTYPE
@@ -764,7 +1131,14 @@ public:
     dirty_state_.set(DirtyState::GraphicsRootArguments);
   };
 
-  void STDMETHODCALLTYPE SetComputeRootConstantBufferView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS VA) { IMPLEMENT_ME };
+  void STDMETHODCALLTYPE SetComputeRootConstantBufferView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS VA) {
+    if (!rootsig_compute_)
+      return;
+    if (Index > rootsig_compute_->ParameterSlots)
+      return;
+    rootarg_compute_staging_[rootsig_compute_->SlotQwordOffsets[Index]] = VA;
+    dirty_state_.set(DirtyState::ComputeRootArguments);
+  };
 
   void STDMETHODCALLTYPE
   SetGraphicsRootConstantBufferView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS VA) {
@@ -776,7 +1150,14 @@ public:
     dirty_state_.set(DirtyState::GraphicsRootArguments);
   };
 
-  void STDMETHODCALLTYPE SetComputeRootShaderResourceView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS VA) { IMPLEMENT_ME };
+  void STDMETHODCALLTYPE SetComputeRootShaderResourceView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS VA) {
+    if (!rootsig_compute_)
+      return;
+    if (Index > rootsig_compute_->ParameterSlots)
+      return;
+    rootarg_compute_staging_[rootsig_compute_->SlotQwordOffsets[Index]] = VA;
+    dirty_state_.set(DirtyState::ComputeRootArguments);
+  };
 
   void STDMETHODCALLTYPE
   SetGraphicsRootShaderResourceView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS VA) {
@@ -788,7 +1169,14 @@ public:
     dirty_state_.set(DirtyState::GraphicsRootArguments);
   };
 
-  void STDMETHODCALLTYPE SetComputeRootUnorderedAccessView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS VA) { IMPLEMENT_ME };
+  void STDMETHODCALLTYPE SetComputeRootUnorderedAccessView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS VA) {
+    if (!rootsig_compute_)
+      return;
+    if (Index > rootsig_compute_->ParameterSlots)
+      return;
+    rootarg_compute_staging_[rootsig_compute_->SlotQwordOffsets[Index]] = VA;
+    dirty_state_.set(DirtyState::ComputeRootArguments);
+  };
 
   void STDMETHODCALLTYPE
   SetGraphicsRootUnorderedAccessView(UINT Index, D3D12_GPU_VIRTUAL_ADDRESS VA) {
@@ -802,9 +1190,10 @@ public:
 
   void STDMETHODCALLTYPE
   IASetIndexBuffer(const D3D12_INDEX_BUFFER_VIEW *pView) {
-    if (pView) {
+    auto index_buffer_allocation = pView ? device_->LookupBufferByVA(pView->BufferLocation, &index_offset) : nullptr;
+    if (index_buffer_allocation) {
       index_buffer_address = pView->BufferLocation;
-      index_buffer = device_->LookupBufferByVA(pView->BufferLocation, &index_offset)->buffer();
+      index_buffer = index_buffer_allocation->buffer();
       index_type = pView->Format == DXGI_FORMAT_R32_UINT ? WMTIndexTypeUInt32 : WMTIndexTypeUInt16;
     } else {
       index_buffer_address = 0;
@@ -816,8 +1205,11 @@ public:
 
   void STDMETHODCALLTYPE
   IASetVertexBuffers(UINT StartSlot, UINT Count, const D3D12_VERTEX_BUFFER_VIEW *Views) {
+    if (!Views)
+      return;
+    
     for (unsigned Slot = StartSlot; Slot < StartSlot + Count; Slot++) {
-      vertex_buffers_[Slot] = Views ? Views[Slot - StartSlot] : D3D12_VERTEX_BUFFER_VIEW{};
+      vertex_buffers_[Slot] = Views[Slot - StartSlot];
     }
     dirty_state_.set(DirtyState::VertexBuffer);
   };
@@ -847,25 +1239,38 @@ public:
       D3D12_CPU_DESCRIPTOR_HANDLE DSV, D3D12_CLEAR_FLAGS Flags, FLOAT Depth, UINT8 Stencil, UINT RectCount,
       const D3D12_RECT *Rects
   ) {
-    if (Rects || RectCount > 1) {
-      ERR("ClearDepthStencilView: unhandled parameter Rects=", Rects, " RectCount=", RectCount);
-      return;
-    }
-    if ((Flags & 3) == 0)
-      return;
     auto [Heap, Index] = GetRenderTargetHeap(device_, DSV);
     auto AttachmentDesc = Heap->GetRenderTarget(Index);
     if (!AttachmentDesc.Texture)
       return;
+    auto CheckedFlags = Flags & DepthStencilPlanarFlags(AttachmentDesc.Texture->pixelFormat(AttachmentDesc.View));
+    if (!CheckedFlags)
+      return;
+    if (Rects) {
+      allocator_->clear_rtv_.begin(AttachmentDesc.Texture, AttachmentDesc.View, 0, CheckedFlags);
+      for (unsigned i = 0; i < RectCount; i++) {
+        auto rect = Rects[i];
+        uint32_t rect_offset_x = std::max(rect.left, (LONG)0);
+        uint32_t rect_offset_y = std::max(rect.top, (LONG)0);
+        int32_t rect_width = rect.right - rect_offset_x;
+        int32_t rect_height = rect.bottom - rect_offset_y;
+        if (rect_height <= 0 || rect_width <= 0)
+          continue;
+        allocator_->clear_rtv_.clear(rect_offset_x, rect_offset_y, rect_width, rect_height, Depth, Stencil);
+      }
+      allocator_->clear_rtv_.end();
+      return;
+    }
     allocator_->InvalidateCurrentPass();
     auto encoder_info = allocator_->AllocatePass<ClearEncoderData>();
     encoder_info->type = EncoderType::Clear;
-    encoder_info->clear_dsv = Flags & 3;
+    encoder_info->clear_dsv = CheckedFlags;
     encoder_info->depth_stencil = {Depth, Stencil};
     encoder_info->attachment = AttachmentDesc.Texture->view(AttachmentDesc.View);
     encoder_info->array_length = AttachmentDesc.RenderTargetArrayLength;
     encoder_info->width = AttachmentDesc.Width;
     encoder_info->height = AttachmentDesc.Height;
+    encoder_info->depth_plane = 0;
 
     allocator_->InvalidateCurrentPass();
   };
@@ -874,14 +1279,28 @@ public:
   ClearRenderTargetView(
       D3D12_CPU_DESCRIPTOR_HANDLE RTV, const FLOAT Color[4], UINT RectCount, const D3D12_RECT *Rects
   ) {
-    if (Rects || RectCount > 1) {
-      ERR("ClearRenderTargetView: unhandled parameter Rects=", Rects, " RectCount=", RectCount);
-      return;
-    }
     auto [Heap, Index] = GetRenderTargetHeap(device_, RTV);
     auto AttachmentDesc = Heap->GetRenderTarget(Index);
     if (!AttachmentDesc.Texture)
       return;
+    if (Rects) {
+      allocator_->clear_rtv_.begin(AttachmentDesc.Texture, AttachmentDesc.View, AttachmentDesc.DepthPlane);
+      for (unsigned i = 0; i < RectCount; i++) {
+        auto rect = Rects[i];
+        uint32_t rect_offset_x = std::max(rect.left, (LONG)0);
+        uint32_t rect_offset_y = std::max(rect.top, (LONG)0);
+        int32_t rect_width = rect.right - rect_offset_x;
+        int32_t rect_height = rect.bottom - rect_offset_y;
+        if (rect_height <= 0 || rect_width <= 0)
+          continue;
+        allocator_->clear_rtv_.clear(
+            rect_offset_x, rect_offset_y, rect_width, rect_height, AttachmentDesc.RenderTargetArrayLength,
+            {Color[0], Color[1], Color[2], Color[3]}
+        );
+      }
+      allocator_->clear_rtv_.end();
+      return;
+    }
     allocator_->InvalidateCurrentPass();
     auto encoder_info = allocator_->AllocatePass<ClearEncoderData>();
     encoder_info->type = EncoderType::Clear;
@@ -892,22 +1311,117 @@ public:
     encoder_info->array_length = AttachmentDesc.RenderTargetArrayLength;
     encoder_info->width = AttachmentDesc.Width;
     encoder_info->height = AttachmentDesc.Height;
+    encoder_info->depth_plane = AttachmentDesc.DepthPlane;
 
     allocator_->InvalidateCurrentPass();
   };
 
-  void STDMETHODCALLTYPE ClearUnorderedAccessViewUint(
+  void STDMETHODCALLTYPE
+  ClearUnorderedAccessViewUint(
       D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle, D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle, ID3D12Resource *pResource,
       const UINT Values[4], UINT RectCount, const D3D12_RECT *pRects
   ) {
-    IMPLEMENT_ME
+    auto [Heap, Index] = GetShaderVisibleDescriptorHeap(device_, CpuHandle);
+    auto &Descriptor = Heap->GetDescriptor(Index);
+    auto color = std::array<uint32_t, 4>({Values[0], Values[1], Values[2], Values[3]});
+    D3D12_RECT full_rect;
+    switch (Descriptor.type) {
+    case ShaderVisibleDescriptorType::UAVBuffer: {
+      allocator_->clear_uav_.begin(color, Descriptor.UAVBuffer.buffer);
+      full_rect = {
+          (LONG)Descriptor.UAVBuffer.slice.byteOffset >> 2, 0,
+          (LONG)((Descriptor.UAVBuffer.slice.byteOffset + Descriptor.UAVBuffer.slice.byteLength) >> 2), 1
+      };
+      break;
+    }
+    case ShaderVisibleDescriptorType::UAVTexture: {
+      allocator_->clear_uav_.begin(color, Descriptor.UAVTexture.texture, Descriptor.UAVTexture.view);
+      full_rect = {
+          0, 0, (LONG)Descriptor.UAVTexture.texture->width(Descriptor.UAVTexture.view),
+          (LONG)Descriptor.UAVTexture.texture->height(Descriptor.UAVTexture.view)
+      };
+      break;
+    }
+    case ShaderVisibleDescriptorType::UAVTexelBuffer: {
+      allocator_->clear_uav_.begin(color, Descriptor.UAVTexelBuffer.buffer, Descriptor.UAVTexelBuffer.view);
+      full_rect = {
+          (LONG)Descriptor.UAVTexelBuffer.slice.firstElement, 0,
+          (LONG)(Descriptor.UAVTexelBuffer.slice.firstElement + Descriptor.UAVTexelBuffer.slice.elementCount), 1
+      };
+      break;
+    }
+    default:
+      allocator_->clear_uav_.end();
+      return;
+    }
+
+    const D3D12_RECT *rects = RectCount > 0 ? pRects : &full_rect;
+    UINT rect_count = RectCount > 0 ? RectCount : 1;
+
+    for (unsigned i = 0; i < rect_count; i++) {
+      auto &rect = rects[i];
+      auto width = rect.right - rect.left;
+      auto height = rect.bottom - rect.top;
+      if (width <= 0 || height <= 0)
+        continue;
+      allocator_->clear_uav_.clear(rect.left, rect.top, width, height);
+    }
+
+    allocator_->clear_uav_.end();
   };
 
-  void STDMETHODCALLTYPE ClearUnorderedAccessViewFloat(
+  void STDMETHODCALLTYPE
+  ClearUnorderedAccessViewFloat(
       D3D12_GPU_DESCRIPTOR_HANDLE GpuHandle, D3D12_CPU_DESCRIPTOR_HANDLE CpuHandle, ID3D12Resource *pResource,
       const float Values[4], UINT RectCount, const D3D12_RECT *pRects
   ) {
-    IMPLEMENT_ME
+    auto [Heap, Index] = GetShaderVisibleDescriptorHeap(device_, CpuHandle);
+    auto &Descriptor = Heap->GetDescriptor(Index);
+    auto color = std::array<float, 4>({Values[0], Values[1], Values[2], Values[3]});
+    D3D12_RECT full_rect;
+    switch (Descriptor.type) {
+    case ShaderVisibleDescriptorType::UAVBuffer: {
+      allocator_->clear_uav_.begin(color, Descriptor.UAVBuffer.buffer);
+      full_rect = {
+          (LONG)Descriptor.UAVBuffer.slice.byteOffset >> 2, 0,
+          (LONG)((Descriptor.UAVBuffer.slice.byteOffset + Descriptor.UAVBuffer.slice.byteLength) >> 2), 1
+      };
+      break;
+    }
+    case ShaderVisibleDescriptorType::UAVTexture: {
+      allocator_->clear_uav_.begin(color, Descriptor.UAVTexture.texture, Descriptor.UAVTexture.view);
+      full_rect = {
+          0, 0, (LONG)Descriptor.UAVTexture.texture->width(Descriptor.UAVTexture.view),
+          (LONG)Descriptor.UAVTexture.texture->height(Descriptor.UAVTexture.view)
+      };
+      break;
+    }
+    case ShaderVisibleDescriptorType::UAVTexelBuffer: {
+      allocator_->clear_uav_.begin(color, Descriptor.UAVTexelBuffer.buffer, Descriptor.UAVTexelBuffer.view);
+      full_rect = {
+          (LONG)Descriptor.UAVTexelBuffer.slice.firstElement, 0,
+          (LONG)(Descriptor.UAVTexelBuffer.slice.firstElement + Descriptor.UAVTexelBuffer.slice.elementCount), 1
+      };
+      break;
+    }
+    default:
+      allocator_->clear_uav_.end();
+      return;
+    }
+
+    const D3D12_RECT *rects = RectCount > 0 ? pRects : &full_rect;
+    UINT rect_count = RectCount > 0 ? RectCount : 1;
+
+    for (unsigned i = 0; i < rect_count; i++) {
+      auto &rect = rects[i];
+      auto width = rect.right - rect.left;
+      auto height = rect.bottom - rect.top;
+      if (width <= 0 || height <= 0)
+        continue;
+      allocator_->clear_uav_.clear(rect.left, rect.top, width, height);
+    }
+
+    allocator_->clear_uav_.end();
   };
 
   void STDMETHODCALLTYPE DiscardResource(ID3D12Resource *pResource, const D3D12_DISCARD_REGION *pRegion) {
@@ -946,8 +1460,110 @@ public:
       ID3D12CommandSignature *pCommandSignature, UINT MaxCommandCount, ID3D12Resource *pArgBuffer,
       UINT64 ArgBufferOffset, ID3D12Resource *pCountBuffer, UINT64 CountBufferOffset
   ) {
-    IMPLEMENT_ME
+    auto sig = static_cast<MTLD3D12CommandSignature *>(pCommandSignature);
+    auto arg_buffer = static_cast<MTLD3D12Resource *>(pArgBuffer);
+    if (!arg_buffer || !arg_buffer->buffer)
+      return;
+    auto ArgBufferAddress = arg_buffer->buffer->current()->gpuAddress() + ArgBufferOffset;
+    uint64_t CountBufferAddress = 0;
+    if (auto count_buffer = static_cast<MTLD3D12Resource *>(pCountBuffer)) {
+      if (!count_buffer->buffer)
+        return;
+      CountBufferAddress = count_buffer->buffer->current()->gpuAddress() + CountBufferOffset;
+    }
+    if (sig->CommandType == D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH) {
+      if (!PreDispatch(sig->UpdateRootArguments))
+        return;
+
+      auto cmd = allocator_->EncodeIndirectComputeCommand(sig, pso_compute_.ptr(), MaxCommandCount);
+      cmd->max_count_buffer = CountBufferAddress;
+      cmd->argument_buffer = ArgBufferAddress;
+
+      if (sig->UpdateRootArguments) {
+        cmd->rootsig_qwords = EncodeRootArgument(rootsig_compute_.ptr(), rootarg_compute_staging_, MaxCommandCount);
+        cmd->rootsig_qwords += allocator_->gpu_heap_buffer_address_;
+        cmd->rootsig_qwords_stride = rootsig_compute_->UploadQwords;
+        cmd->static_samplers = EncodeStaticSamplers(rootsig_compute_.ptr());
+        cmd->static_samplers += allocator_->gpu_heap_buffer_address_;
+      }
+
+      return;
+    }
+    WMTPrimitiveType primitive_type;
+    uint32_t cp_count;
+    if (!to_metal_primitive_type(topology_, primitive_type, cp_count))
+      return;
+    bool encode_binding = sig->UpdateRootArguments || sig->UpdateIndexBuffer || sig->UpdateVertexBuffers;
+    DrawCallStatus status = PreDraw(encode_binding);
+    if (status == DrawCallStatus::Invalid)
+      return;
+    if (status != DrawCallStatus::Ordinary) {
+      IMPLEMENT_ME // TODO: (potential) emulated pipeline
+    }
+
+    auto cmd = allocator_->EncodeIndirectRenderCommand(sig, pso_graphics_.ptr(), MaxCommandCount);
+    cmd->max_count_buffer = CountBufferAddress;
+    cmd->argument_buffer = ArgBufferAddress;
+    cmd->primitive_type = primitive_type;
+    cmd->index_buffer = index_buffer_address;
+    cmd->index_buffer_format = index_type == WMTIndexTypeUInt32 ? DXGI_FORMAT_R32_UINT : DXGI_FORMAT_R16_UINT;
+    if (!encode_binding)
+      return;
+    cmd->rootsig_qwords = EncodeRootArgument(rootsig_graphics_.ptr(), rootarg_graphics_staging_, MaxCommandCount);
+    cmd->rootsig_qwords += allocator_->gpu_heap_buffer_address_;
+    cmd->rootsig_qwords_stride = rootsig_graphics_->UploadQwords;
+    cmd->static_samplers = EncodeStaticSamplers(rootsig_graphics_.ptr());
+    cmd->static_samplers += allocator_->gpu_heap_buffer_address_;
+    auto [VBOffset, VBStride] = PopulateVertexBufferTable(MaxCommandCount);
+    cmd->vertex_buffer = allocator_->gpu_heap_buffer_address_ + VBOffset;
+    cmd->vertex_argbuf_stride = VBStride;
   };
+
+  void STDMETHODCALLTYPE
+  AtomicCopyBufferUINT(
+      ID3D12Resource *pDstBuffer, UINT64 DstOffset, ID3D12Resource *pSrcBuffer, UINT64 SrcOffset, UINT Dependencies,
+      ID3D12Resource *const *ppDependentResources, const D3D12_SUBRESOURCE_RANGE_UINT64 *pDependentSubresourceRanges
+  ) {
+    IMPLEMENT_ME
+  }
+
+  void STDMETHODCALLTYPE
+  AtomicCopyBufferUINT64(
+      ID3D12Resource *pDstBuffer, UINT64 DstOffset, ID3D12Resource *pSrcBuffer, UINT64 SrcOffset, UINT Dependencies,
+      ID3D12Resource *const *ppDependentResources, const D3D12_SUBRESOURCE_RANGE_UINT64 *pDependentSubresourceRanges
+  ) {
+    IMPLEMENT_ME
+  }
+
+  void STDMETHODCALLTYPE
+  OMSetDepthBounds(FLOAT Min, FLOAT Max) {
+    WARN("OMSetDepthBounds: ignoring (", Min, ", ", Max, ")");
+  }
+
+  void STDMETHODCALLTYPE
+  SetSamplePositions(UINT NumSamplesPerPixel, UINT NumPixels, D3D12_SAMPLE_POSITION *pSamplePositions) {
+    IMPLEMENT_ME
+  }
+
+  void STDMETHODCALLTYPE
+  ResolveSubresourceRegion(
+      ID3D12Resource *pDstResource, UINT DstSubresource, UINT DstX, UINT DstY, ID3D12Resource *pSrcResource,
+      UINT SrcSubresource, D3D12_RECT *pSrcRect, DXGI_FORMAT Format, D3D12_RESOLVE_MODE ResolveMode
+  ) {
+    IMPLEMENT_ME
+  }
+
+  void STDMETHODCALLTYPE
+  SetViewInstanceMask(UINT Mask) {
+    IMPLEMENT_ME
+  }
+
+  void STDMETHODCALLTYPE
+  WriteBufferImmediate(
+      UINT Count, const D3D12_WRITEBUFFERIMMEDIATE_PARAMETER *pParams, const D3D12_WRITEBUFFERIMMEDIATE_MODE *pModes
+  ) {
+    IMPLEMENT_ME
+  }
 };
 
 HRESULT STDMETHODCALLTYPE

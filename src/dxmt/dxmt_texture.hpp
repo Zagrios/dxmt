@@ -38,6 +38,7 @@ enum class TextureAllocationFlag : uint32_t {
   GpuManaged = 4,
   Shared = 5,
   ShaderReadonly = 6,
+  AllocatedOnHeap = 7,
 };
 
 struct TextureViewDescriptor {
@@ -242,6 +243,11 @@ public:
     return std::max(info_.height >> view.mip_start, 1u);
   }
 
+  unsigned
+  depth(TextureViewKey view) const {
+    return std::max(info_.depth >> view.mip_start, 1u);
+  }
+
   /**
   \warning for cube texture, this would be multiple of 6.
   */
@@ -270,6 +276,7 @@ public:
   TextureViewKey fullView;
 
   Rc<TextureAllocation> allocate(Flags<TextureAllocationFlag> flags);
+  Rc<TextureAllocation> allocate(Flags<TextureAllocationFlag> flags, WMT::Heap heap, uint64_t heap_offset = 0);
   Rc<TextureAllocation> import(mach_port_t mach_port);
   /* Linear texture over a caller-provided buffer (must be constructed with
    * the (bytes_per_image, bytes_per_row, ...) ctor).  Used by the native

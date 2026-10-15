@@ -45,8 +45,8 @@ public:
           unorm_output_reg_mask, uint_output_reg_mask,
           sint_output_reg_mask});
       ps_valid_render_targets = pDesc->PixelShader->reflection().PSValidRenderTargets;
-      ps_uint_output_registers = pDesc->PixelShader->reflection().PSUintOutputRegisterMask;
-      ps_sint_output_registers = pDesc->PixelShader->reflection().PSSintOutputRegisterMask;
+      ps_uint_output_registers = pDesc->PixelShader->reflection().PixelShader.UintOutputRegisterMask;
+      ps_sint_output_registers = pDesc->PixelShader->reflection().PixelShader.SintOutputRegisterMask;
     } else {
       PixelShader = nullptr;
       ps_valid_render_targets = 0;

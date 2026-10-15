@@ -18,6 +18,7 @@
 
 #include "Metal.hpp"
 #include "airconv_public.h"
+#include "config/config.hpp"
 #include "d3d11_device.hpp"
 #include "d3d11_pipeline.hpp"
 #include "d3d11_shader.hpp"
@@ -61,10 +62,17 @@ public:
       // indeed this value might be too conservative
       max_potential_factor = std::min(8u, max_potential_factor);
     }
-    if ((float)max_potential_factor < hull_reflection.Tessellator.MaxFactor) {
-      WARN("maxtessfactor(", hull_reflection.Tessellator.MaxFactor,
-           ") is too large for a mesh pipeline. Clamping to ",
-           max_potential_factor);
+    auto expected_tess_factor = hull_reflection.Tessellator.MaxFactor;
+    if (uint32_t tess_factor_config = Config::getInstance().getOption<int32_t>("d3d11.maxTessFactor", 0u);
+        tess_factor_config >= 4 && tess_factor_config <= 64) {
+      expected_tess_factor = tess_factor_config;
+      max_potential_factor = std::min(tess_factor_config, max_potential_factor);
+    }
+    if ((float)max_potential_factor < expected_tess_factor) {
+      WARN(
+          "maxtessfactor(", expected_tess_factor, ") is too large for a mesh pipeline. Clamping to ",
+          max_potential_factor
+      );
     }
 
     VertexHullShader =
@@ -83,8 +91,8 @@ public:
           unorm_output_reg_mask, uint_output_reg_mask,
           sint_output_reg_mask});
       ps_valid_render_targets = pDesc->PixelShader->reflection().PSValidRenderTargets;
-      ps_uint_output_registers = pDesc->PixelShader->reflection().PSUintOutputRegisterMask;
-      ps_sint_output_registers = pDesc->PixelShader->reflection().PSSintOutputRegisterMask;
+      ps_uint_output_registers = pDesc->PixelShader->reflection().PixelShader.UintOutputRegisterMask;
+      ps_sint_output_registers = pDesc->PixelShader->reflection().PixelShader.SintOutputRegisterMask;
     } else {
       PixelShader = nullptr;
       ps_valid_render_targets = 0;

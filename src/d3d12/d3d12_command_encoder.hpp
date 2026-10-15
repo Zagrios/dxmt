@@ -28,6 +28,8 @@ enum class EncoderType {
   Clear,
   Render,
   Blit,
+  Compute,
+  Resolve,
 };
 
 struct EncoderData {
@@ -46,6 +48,7 @@ struct ClearEncoderData : EncoderData {
   unsigned array_length;
   unsigned width;
   unsigned height;
+  unsigned depth_plane;
 
   ClearEncoderData() {}
 };
@@ -105,6 +108,15 @@ struct RenderEncoderData : EncoderData {
 struct BlitEncoderData : EncoderData {
   wmtcmd_blit_nop cmd_head;
   wmtcmd_base *cmd_tail;
+};
+
+struct ComputeEncoderData : EncoderData {
+  wmtcmd_compute_nop cmd_head;
+  wmtcmd_base *cmd_tail;
+};
+struct ResolveEncoderData : EncoderData {
+  TextureViewRef src;
+  TextureViewRef dst;
 };
 
 }; // namespace dxmt

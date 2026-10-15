@@ -19,6 +19,7 @@
 #include "d3d12_device.hpp"
 #include "d3d12_pageable.hpp"
 #include "com/com_pointer.hpp"
+#include "dxmt_format.hpp"
 
 namespace dxmt {
 
@@ -33,7 +34,7 @@ public:
   HRESULT
   Initialize(
       const D3D12_HEAP_PROPERTIES *pHeapProps, D3D12_HEAP_FLAGS HeapFlags, const D3D12_RESOURCE_DESC *pDesc,
-      const D3D12_CLEAR_VALUE *OptimizedClearValue, MTLD3D12Heap *pHeap
+      const D3D12_CLEAR_VALUE *OptimizedClearValue, MTLD3D12Heap *pHeap, UINT64 Offset
   ) {
     if (OptimizedClearValue)
       return E_INVALIDARG;
@@ -43,17 +44,34 @@ public:
     heap_props_ = *pHeapProps;
     heap_flags_ = HeapFlags;
 
+    if (desc_.Alignment) {
+      if (desc_.Alignment != D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT)
+        return E_INVALIDARG;
+    } else {
+      desc_.Alignment = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+    }
+
+    if (pHeap) {
+      auto size_and_align = device_->GetMTLDevice().heapBufferSizeAndAlign(desc_.Width, {});
+      if (size_and_align.size + Offset > pHeap->GetDesc().SizeInBytes)
+        return E_INVALIDARG;
+    }
+
     buffer = new Buffer(desc_.Width, device_->GetMTLDevice());
 
     Flags<BufferAllocationFlag> flags;
-    buffer->rename(buffer->allocate(flags));
+    if (pHeap)
+      buffer->rename(buffer->allocate(flags, pHeap->heap, Offset));
+    else
+      buffer->rename(buffer->allocate(flags));
     device_->RegisterResidencyAndVA(buffer->current());
 
     return S_OK;
   };
 
   ~MTLD3D12Buffer() {
-    device_->UnregisterResidencyAndVA(buffer->current());
+    if (buffer)
+      device_->UnregisterResidencyAndVA(buffer->current());
   }
 
   HRESULT
@@ -83,8 +101,6 @@ public:
       return E_INVALIDARG;
     if (heap_props_.Type == D3D12_HEAP_TYPE_DEFAULT)
       return E_INVALIDARG;
-    if (pReadRange && pReadRange->Begin != 0)
-      IMPLEMENT_ME
     if (ppData)
       *ppData = buffer->current()->mappedMemory(0);
     return S_OK;
@@ -130,16 +146,94 @@ public:
 
   virtual HRESULT STDMETHODCALLTYPE
   CreateShaderResourceView(const D3D12_SHADER_RESOURCE_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE Descriptor) {
-    IMPLEMENT_ME
-    return S_OK;
+    HRESULT hr;
+    D3D12_SHADER_RESOURCE_VIEW_DESC ViewDesc;
+    if (!pDesc) {
+      hr = ExtractEntireResourceViewDescription(desc_, &ViewDesc);
+      if (FAILED(hr))
+        return hr;
+    } else {
+      ViewDesc = *pDesc;
+    }
+
+    if (ViewDesc.ViewDimension != D3D12_SRV_DIMENSION_BUFFER)
+      return E_INVALIDARG;
+
+    auto [Heap, Index] = GetShaderVisibleDescriptorHeap(device_, Descriptor);
+    BufferSlice Slice;
+
+    if (ViewDesc.Format == DXGI_FORMAT_UNKNOWN || ViewDesc.Buffer.Flags & D3D12_BUFFER_SRV_FLAG_RAW) {
+      UINT Stride = (ViewDesc.Buffer.Flags & D3D12_BUFFER_SRV_FLAG_RAW) ? 4 : ViewDesc.Buffer.StructureByteStride;
+      Slice.firstElement = ViewDesc.Buffer.FirstElement;
+      Slice.elementCount = ViewDesc.Buffer.NumElements;
+      Slice.byteOffset = Slice.firstElement * Stride;
+      Slice.byteLength = Slice.elementCount * Stride;
+      return Heap->AddShaderResourceView(Index, buffer.ptr(), Slice);
+    }
+
+    MTL_DXGI_FORMAT_DESC Format;
+    if (FAILED(MTLQueryDXGIFormat(device_->GetMTLDevice(), ViewDesc.Format, Format))) {
+      ERR("D3D12Buffer::CreateShaderResourceView: not an ordinary or packed format: ", ViewDesc.Format);
+      return E_FAIL;
+    }
+    BufferViewDescriptor view_descriptor{Format.PixelFormat};
+    Slice.firstElement = ViewDesc.Buffer.FirstElement;
+    Slice.elementCount = ViewDesc.Buffer.NumElements;
+    Slice.byteOffset = Format.BytesPerTexel * ViewDesc.Buffer.FirstElement;
+    Slice.byteLength = Format.BytesPerTexel * ViewDesc.Buffer.NumElements;
+
+    auto view = buffer->createView(view_descriptor);
+    return Heap->AddShaderResourceView(Index, buffer.ptr(), view, Slice);
   };
 
   virtual HRESULT STDMETHODCALLTYPE
   CreateUnorderedAccessView(
       ID3D12Resource *pCounter, const D3D12_UNORDERED_ACCESS_VIEW_DESC *pDesc, D3D12_CPU_DESCRIPTOR_HANDLE Descriptor
   ) {
-    IMPLEMENT_ME
-    return S_OK;
+    HRESULT hr;
+    D3D12_UNORDERED_ACCESS_VIEW_DESC ViewDesc;
+    if (!pDesc) {
+      hr = ExtractEntireResourceViewDescription(desc_, &ViewDesc);
+      if (FAILED(hr))
+        return hr;
+    } else {
+      ViewDesc = *pDesc;
+    }
+
+    if (ViewDesc.ViewDimension != D3D12_UAV_DIMENSION_BUFFER)
+      return E_INVALIDARG;
+
+    auto [Heap, Index] = GetShaderVisibleDescriptorHeap(device_, Descriptor);
+    BufferSlice Slice;
+
+    if (ViewDesc.Format == DXGI_FORMAT_UNKNOWN || ViewDesc.Buffer.Flags & D3D12_BUFFER_UAV_FLAG_RAW) {
+      UINT Stride = (ViewDesc.Buffer.Flags & D3D12_BUFFER_UAV_FLAG_RAW) ? 4 : ViewDesc.Buffer.StructureByteStride;
+      Slice.firstElement = ViewDesc.Buffer.FirstElement;
+      Slice.elementCount = ViewDesc.Buffer.NumElements;
+      Slice.byteOffset = Slice.firstElement * Stride;
+      Slice.byteLength = Slice.elementCount * Stride;
+      if (!pCounter)
+        return Heap->AddUnorderedAccessView(Index, buffer.ptr(), Slice, nullptr, 0);
+
+      auto Counter = static_cast<MTLD3D12Buffer *>(pCounter);
+      return Heap->AddUnorderedAccessView(
+          Index, buffer.ptr(), Slice, Counter->buffer.ptr(), ViewDesc.Buffer.CounterOffsetInBytes
+      );
+    }
+
+    MTL_DXGI_FORMAT_DESC Format;
+    if (FAILED(MTLQueryDXGIFormat(device_->GetMTLDevice(), ViewDesc.Format, Format))) {
+      ERR("D3D12Buffer::CreateUnorderedAccessView: not an ordinary or packed format: ", ViewDesc.Format);
+      return E_FAIL;
+    }
+    BufferViewDescriptor view_descriptor{Format.PixelFormat};
+    Slice.firstElement = ViewDesc.Buffer.FirstElement;
+    Slice.elementCount = ViewDesc.Buffer.NumElements;
+    Slice.byteOffset = Format.BytesPerTexel * ViewDesc.Buffer.FirstElement;
+    Slice.byteLength = Format.BytesPerTexel * ViewDesc.Buffer.NumElements;
+
+    auto view = buffer->createView(view_descriptor);
+    return Heap->AddUnorderedAccessView(Index, buffer.ptr(), view, Slice);
   };
 
   virtual HRESULT STDMETHODCALLTYPE
@@ -168,9 +262,8 @@ CreateCommittedBuffer(
     const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialState, const D3D12_CLEAR_VALUE *OptimizedClearValue,
     REFIID riid, void **ppResource
 ) {
-  InitReturnPtr(ppResource);
   auto buffer = Com(new MTLD3D12Buffer(pDevice));
-  HRESULT hr = buffer->Initialize(pHeapProps, HeapFlags, pDesc, OptimizedClearValue, nullptr);
+  HRESULT hr = buffer->Initialize(pHeapProps, HeapFlags, pDesc, OptimizedClearValue, nullptr, 0);
   if (FAILED(hr))
     return hr;
   if (!ppResource)
@@ -180,13 +273,16 @@ CreateCommittedBuffer(
 
 HRESULT
 CreatePlacedBuffer(
-    MTLD3D12Device *pDevice, MTLD3D12Heap *pHeap, const D3D12_RESOURCE_DESC *pDesc, D3D12_RESOURCE_STATES InitialState,
-    const D3D12_CLEAR_VALUE *OptimizedClearValue, REFIID riid, void **ppResource
+    MTLD3D12Device *pDevice, MTLD3D12Heap *pHeap, UINT64 Offset, const D3D12_RESOURCE_DESC *pDesc,
+    D3D12_RESOURCE_STATES InitialState, const D3D12_CLEAR_VALUE *OptimizedClearValue, REFIID riid, void **ppResource
 ) {
-  InitReturnPtr(ppResource);
   auto buffer = Com(new MTLD3D12Buffer(pDevice));
   D3D12_HEAP_DESC heap_desc = pHeap->GetDesc();
-  HRESULT hr = buffer->Initialize(&heap_desc.Properties, heap_desc.Flags, pDesc, OptimizedClearValue, pHeap);
+
+  if (heap_desc.Flags & D3D12_HEAP_FLAG_DENY_BUFFERS)
+    return E_INVALIDARG;
+
+  HRESULT hr = buffer->Initialize(&heap_desc.Properties, heap_desc.Flags, pDesc, OptimizedClearValue, pHeap, Offset);
   if (FAILED(hr))
     return hr;
   if (!ppResource)

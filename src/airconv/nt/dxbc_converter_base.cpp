@@ -40,8 +40,8 @@ Converter::LoadOperandIndex(const IndexByTempComponent &SrcOpIndex) {
   auto Comp = SrcOpIndex.component;
   SrcOperandTemp RelReg{
       ._ = {{Comp, Comp, Comp, Comp}, false, false, OperandDataType::Integer},
-      .phase = SrcOpIndex.phase,
       .regid = SrcOpIndex.regid,
+      .phase = SrcOpIndex.phase,
   };
   auto Rel = LoadOperand(RelReg, 0b1);
   return ir.CreateAdd(Rel, ir.getInt32(SrcOpIndex.offset));
@@ -52,9 +52,9 @@ Converter::LoadOperandIndex(const IndexByIndexableTempComponent &SrcOpIndex) {
   auto Comp = SrcOpIndex.component;
   SrcOperandIndexableTemp RelReg{
       ._ = {{Comp, Comp, Comp, Comp}, false, false, OperandDataType::Integer},
-      .phase = SrcOpIndex.phase,
-      .regindex = SrcOpIndex.regid,
       .regfile = SrcOpIndex.regfile,
+      .regindex = SrcOpIndex.regid,
+      .phase = SrcOpIndex.phase,
   };
   auto Rel = LoadOperand(RelReg, 0b1);
   return ir.CreateAdd(Rel, ir.getInt32(SrcOpIndex.offset));
@@ -1011,7 +1011,10 @@ Converter::operator()(const InstIntegerUnaryOp &unary) {
   case IntegerUnaryOp::FirstHiBitSigned:
     Value = ir.CreateSelect(
         ir.CreateIsNotNeg(Value), air.CreateCountZero(Value, false),
-        ir.CreateAdd(air.CreateCountZero(ir.CreateShl(ir.CreateNot(Value), ir.getInt32(1)), false), ir.getInt32(1))
+        ir.CreateAdd(
+            air.CreateCountZero(ir.CreateShl(ir.CreateNot(Value), 1ull), false),
+            llvm::ConstantInt::get(Value->getType(), 1)
+        )
     );
     Value = MaxIfInMask(~((uint32_t)0x1f), Value);
     break;

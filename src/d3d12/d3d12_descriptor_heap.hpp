@@ -18,6 +18,7 @@
 
 #pragma once
 #include "d3d12.h"
+#include "dxmt_buffer.hpp"
 #include "dxmt_texture.hpp"
 #include <cstdint>
 
@@ -78,6 +79,11 @@ enum class ShaderVisibleDescriptorType {
   Null,
   SRVTexture,
   ConstantBuffer,
+  UAVTexture,
+  UAVTexelBuffer,
+  UAVBuffer,
+  SRVTexelBuffer,
+  SRVBuffer,
 };
 
 struct SRVTextureCPUStorage {
@@ -85,16 +91,38 @@ struct SRVTextureCPUStorage {
   TextureViewKey view{};
 };
 
+using UAVTextureCPUStorage = SRVTextureCPUStorage;
+
+struct UAVTexelBufferCPUStorage {
+  Buffer *buffer = nullptr;
+  BufferViewKey view{};
+  BufferSlice slice{};
+};
+
+using SRVTexelBufferCPUStorage = UAVTexelBufferCPUStorage;
+
 struct CBVCommonStorage {
   uint64_t address = 0;
   uint64_t size = 0;
 };
+
+struct UAVBufferCPUStorage {
+  Buffer *buffer = nullptr;
+  BufferSlice slice{};
+};
+
+using SRVBufferCPUStorage = UAVBufferCPUStorage;
 
 struct ShaderVisibleDescriptorCPUStorage {
   ShaderVisibleDescriptorType type;
   union {
     SRVTextureCPUStorage SRVTexture;
     CBVCommonStorage ConstantBuffer;
+    UAVTextureCPUStorage UAVTexture;
+    UAVTexelBufferCPUStorage UAVTexelBuffer;
+    UAVBufferCPUStorage UAVBuffer;
+    SRVTexelBufferCPUStorage SRVTexelBuffer;
+    SRVBufferCPUStorage SRVBuffer;
   };
 
   ShaderVisibleDescriptorCPUStorage() : type(ShaderVisibleDescriptorType::Null) {}
@@ -106,10 +134,33 @@ public:
   AddShaderResourceView(UINT Index, Texture *Texture, TextureViewKey View, FLOAT ResourceMinLODClamp) = 0;
 
   virtual HRESULT AddConstantBufferView(UINT Index, UINT64 VA, UINT32 SizeInBytes) = 0;
+
+  virtual HRESULT AddUnorderedAccessView(UINT Index, Texture *Texture, TextureViewKey View) = 0;
+
+  virtual HRESULT AddUnorderedAccessView(UINT Index, Buffer *Buffer, BufferViewKey View, BufferSlice Slice) = 0;
+
+  virtual HRESULT AddUnorderedAccessView(
+      UINT Index, Buffer *UAVBuffer, BufferSlice Slice, Buffer *Counter, UINT CounterOffsetInBytes
+  ) = 0;
+
+  virtual HRESULT AddShaderResourceView(UINT Index, Buffer *Buffer, BufferViewKey View, BufferSlice Slice) = 0;
+
+  virtual HRESULT AddShaderResourceView(UINT Index, Buffer *Buffer, BufferSlice Slice) = 0;
+
+  virtual HRESULT AddShaderResourceView(UINT Index, D3D12_SHADER_RESOURCE_VIEW_DESC const *pDesc) = 0;
+
+  virtual HRESULT AddUnorderedAccessView(UINT Index, D3D12_UNORDERED_ACCESS_VIEW_DESC const *pDesc) = 0;
+
+  virtual ShaderVisibleDescriptorCPUStorage const &GetDescriptor(UINT Index) = 0;
+
+  virtual void CopyDescriptors(UINT From, MTLD3D12DescriptorHeap *pHeapTo, UINT DescriptorTo, UINT CopyCount) = 0;
 };
 
 class MTLD3D12SamplerDescriptorHeap : public ID3D12DescriptorHeap {
 public:
+  virtual HRESULT AddSampler(UINT Index, const D3D12_SAMPLER_DESC *Desc) = 0;
+
+  virtual void CopyDescriptors(UINT From, MTLD3D12SamplerDescriptorHeap *pHeapTo, UINT DescriptorTo, UINT CopyCount) = 0;
 };
 
 struct MTL_RENDER_TARGET_DESC {
@@ -126,6 +177,8 @@ class MTLD3D12RenderTargetDescriptorHeap : public ID3D12DescriptorHeap {
 public:
   virtual HRESULT AddRenderTarget(UINT Index, MTL_RENDER_TARGET_DESC const *pDesc) = 0;
   virtual MTL_RENDER_TARGET_DESC GetRenderTarget(UINT Index) = 0;
+
+  virtual void CopyDescriptors(UINT From, MTLD3D12RenderTargetDescriptorHeap *pHeapTo, UINT DescriptorTo, UINT CopyCount) = 0;
 };
 
 } // namespace dxmt

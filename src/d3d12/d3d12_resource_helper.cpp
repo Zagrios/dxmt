@@ -17,6 +17,7 @@
  */
 
 #include "d3d12_device.hpp"
+#include "util_bit.hpp"
 
 namespace dxmt {
 
@@ -212,6 +213,274 @@ ExtractEntireResourceViewDescription<D3D12_SHADER_RESOURCE_VIEW_DESC>(
   }
 
   return S_OK;
+}
+
+template <>
+HRESULT
+ExtractEntireResourceViewDescription<D3D12_UNORDERED_ACCESS_VIEW_DESC>(
+    const D3D12_RESOURCE_DESC &ResourceDesc, D3D12_UNORDERED_ACCESS_VIEW_DESC *pViewDescOut
+) {
+  pViewDescOut->Format = ResourceDesc.Format;
+  switch (ResourceDesc.Dimension) {
+  case D3D12_RESOURCE_DIMENSION_BUFFER: {
+    ERR("Unsupported buffer UAV");
+    return E_FAIL;
+  }
+  case D3D12_RESOURCE_DIMENSION_TEXTURE1D: {
+    if (ResourceDesc.DepthOrArraySize > 1) {
+      pViewDescOut->ViewDimension = D3D12_UAV_DIMENSION_TEXTURE1DARRAY;
+      pViewDescOut->Texture1DArray.MipSlice = 0;
+      pViewDescOut->Texture1DArray.FirstArraySlice = 0;
+      pViewDescOut->Texture1DArray.ArraySize = ResourceDesc.DepthOrArraySize;
+    } else {
+      pViewDescOut->ViewDimension = D3D12_UAV_DIMENSION_TEXTURE1D;
+      pViewDescOut->Texture1D.MipSlice = 0;
+    }
+    break;
+  }
+  case D3D12_RESOURCE_DIMENSION_TEXTURE2D: {
+    if (ResourceDesc.SampleDesc.Count > 1)
+      return E_FAIL;
+    if (ResourceDesc.DepthOrArraySize > 1) {
+      pViewDescOut->ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2DARRAY;
+      pViewDescOut->Texture2DArray.MipSlice = 0;
+      pViewDescOut->Texture2DArray.FirstArraySlice = 0;
+      pViewDescOut->Texture2DArray.ArraySize = ResourceDesc.DepthOrArraySize;
+      pViewDescOut->Texture2DArray.PlaneSlice = 0; // FIXME(resource-planar)
+    } else {
+      pViewDescOut->ViewDimension = D3D12_UAV_DIMENSION_TEXTURE2D;
+      pViewDescOut->Texture2D.MipSlice = 0;
+      pViewDescOut->Texture2D.PlaneSlice = 0; // FIXME(resource-planar)
+    }
+    break;
+  }
+  case D3D12_RESOURCE_DIMENSION_TEXTURE3D: {
+    pViewDescOut->ViewDimension = D3D12_UAV_DIMENSION_TEXTURE3D;
+    pViewDescOut->Texture3D.FirstWSlice = 0;
+    pViewDescOut->Texture3D.WSize = ResourceDesc.DepthOrArraySize;
+    pViewDescOut->Texture3D.MipSlice = 0;
+    break;
+  }
+  default:
+    return E_INVALIDARG;
+  }
+
+  return S_OK;
+}
+
+constexpr D3D12_RESOURCE_STATES kExclusiveWrite =
+    D3D12_RESOURCE_STATE_RENDER_TARGET | D3D12_RESOURCE_STATE_UNORDERED_ACCESS | D3D12_RESOURCE_STATE_DEPTH_WRITE |
+    D3D12_RESOURCE_STATE_STREAM_OUT | D3D12_RESOURCE_STATE_COPY_DEST | D3D12_RESOURCE_STATE_RESOLVE_DEST |
+    D3D12_RESOURCE_STATE_VIDEO_DECODE_WRITE | D3D12_RESOURCE_STATE_VIDEO_PROCESS_WRITE |
+    D3D12_RESOURCE_STATE_VIDEO_ENCODE_WRITE;
+
+HRESULT
+ValidateResourceStates(D3D12_RESOURCE_STATES State, const D3D12_HEAP_PROPERTIES *pHeapProps) {
+  if (State & kExclusiveWrite) {
+    if (State & ~kExclusiveWrite)
+      return E_INVALIDARG;
+    if (bit::popcnt(State) != 1)
+      return E_INVALIDARG;
+  }
+
+  switch (pHeapProps->Type) {
+  case D3D12_HEAP_TYPE_READBACK: {
+    if (State != D3D12_RESOURCE_STATE_COPY_DEST && State != D3D12_RESOURCE_STATE_COMMON)
+      return E_INVALIDARG;
+    break;
+  }
+  default:
+    break;
+  }
+
+  return S_OK;
+}
+
+bool
+IsCpuVisibleHeap(const D3D12_HEAP_PROPERTIES *pHeapProps) {
+  switch (pHeapProps->Type) {
+  case D3D12_HEAP_TYPE_UPLOAD:
+  case D3D12_HEAP_TYPE_READBACK:
+    return true;
+  case D3D12_HEAP_TYPE_CUSTOM:
+    return pHeapProps->CPUPageProperty != D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE;
+  default:
+    return false;
+  }
+}
+
+HRESULT
+ValidateResourceDescs(const D3D12_RESOURCE_DESC *pDesc, const D3D12_HEAP_PROPERTIES *pHeapProps) {
+  auto HeapType = pHeapProps->Type;
+  switch (HeapType) {
+  case D3D12_HEAP_TYPE_UPLOAD: {
+    if (pDesc->Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)
+      return E_INVALIDARG;
+    if (pDesc->Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
+      return E_INVALIDARG;
+    if (pDesc->Dimension != D3D12_RESOURCE_DIMENSION_BUFFER)
+      return E_INVALIDARG;
+    break;
+  }
+  case D3D12_HEAP_TYPE_READBACK: {
+    if (pDesc->Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET)
+      return E_INVALIDARG;
+    if (pDesc->Flags & D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
+      return E_INVALIDARG;
+    if (pDesc->Dimension != D3D12_RESOURCE_DIMENSION_BUFFER)
+      return E_INVALIDARG;
+    break;
+  }
+  case D3D12_HEAP_TYPE_DEFAULT:
+  case D3D12_HEAP_TYPE_CUSTOM:
+    break;
+  default:
+    return E_INVALIDARG;
+  }
+
+  switch (pDesc->Dimension) {
+  case D3D12_RESOURCE_DIMENSION_BUFFER: {
+    if (pDesc->Flags & D3D12_RESOURCE_FLAG_ALLOW_SIMULTANEOUS_ACCESS)
+      return E_INVALIDARG;
+    break;
+  }
+  case D3D12_RESOURCE_DIMENSION_TEXTURE1D:
+  case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
+  case D3D12_RESOURCE_DIMENSION_TEXTURE3D: {
+    if (pDesc->Layout != D3D12_TEXTURE_LAYOUT_ROW_MAJOR)
+      break;
+    if (pDesc->Dimension == D3D12_RESOURCE_DIMENSION_TEXTURE2D) {
+      if (!(pDesc->Flags & D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER))
+        return E_INVALIDARG;
+      if (pDesc->MipLevels != 1 || pDesc->DepthOrArraySize != 1)
+        return E_INVALIDARG;
+      if (IsCpuVisibleHeap(pHeapProps))
+        return E_INVALIDARG;
+    } else {
+      return E_INVALIDARG;
+    }
+    break;
+  }
+  default:
+    break;
+  }
+
+  return S_OK;
+}
+
+HRESULT
+ValidateHeapProperties(const D3D12_HEAP_PROPERTIES *pHeapProps, D3D12_HEAP_FLAGS Flags, bool AdapterIsNUMA) {
+  switch (pHeapProps->Type) {
+  case D3D12_HEAP_TYPE_DEFAULT:
+  case D3D12_HEAP_TYPE_READBACK: {
+    if (Flags & D3D12_HEAP_FLAG_ALLOW_WRITE_WATCH)
+      return E_INVALIDARG;
+    [[fallthrough]];
+  }
+  case D3D12_HEAP_TYPE_UPLOAD: {
+    if (pHeapProps->CPUPageProperty != D3D12_CPU_PAGE_PROPERTY_UNKNOWN)
+      return E_INVALIDARG;
+    if (pHeapProps->MemoryPoolPreference != D3D12_MEMORY_POOL_UNKNOWN)
+      return E_INVALIDARG;
+    break;
+  }
+  case D3D12_HEAP_TYPE_CUSTOM: {
+    if (pHeapProps->CPUPageProperty == D3D12_CPU_PAGE_PROPERTY_UNKNOWN)
+      return E_INVALIDARG;
+    if (pHeapProps->MemoryPoolPreference == D3D12_MEMORY_POOL_UNKNOWN)
+      return E_INVALIDARG;
+    if (pHeapProps->MemoryPoolPreference == D3D12_MEMORY_POOL_L1 && AdapterIsNUMA) {
+      if (pHeapProps->CPUPageProperty != D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE)
+        return E_INVALIDARG;
+    }
+    break;
+  }
+  default:
+    return E_INVALIDARG;
+  }
+
+  if (pHeapProps->MemoryPoolPreference == D3D12_MEMORY_POOL_L1) {
+    if (!AdapterIsNUMA)
+      return E_INVALIDARG;
+    if (pHeapProps->CPUPageProperty != D3D12_CPU_PAGE_PROPERTY_NOT_AVAILABLE)
+      return E_INVALIDARG;
+  }
+
+  if ((Flags & D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER) && IsCpuVisibleHeap(pHeapProps))
+    return E_INVALIDARG;
+
+  // TODO(d3d12): check NodeMask
+  return S_OK;
+}
+
+D3D12_BOX
+GetResourceExtent(const D3D12_RESOURCE_DESC &Desc, UINT MipSlice) {
+  D3D12_BOX box{0, 0, 0, 1, 1, 1};
+  switch (Desc.Dimension) {
+  default:
+    break;
+  case D3D12_RESOURCE_DIMENSION_TEXTURE3D:
+    box.back = std::max<uint32_t>(1u, Desc.DepthOrArraySize >> MipSlice);
+    [[fallthrough]];
+  case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
+    box.bottom = std::max<uint32_t>(1u, Desc.Height >> MipSlice);
+    [[fallthrough]];
+  case D3D12_RESOURCE_DIMENSION_BUFFER:
+  case D3D12_RESOURCE_DIMENSION_TEXTURE1D:
+    box.right = std::max<uint32_t>(1u, Desc.Width >> MipSlice);
+    break;
+  }
+  return box;
+}
+
+UINT
+DecomposeSubresource(
+    const D3D12_RESOURCE_DESC &Desc, UINT Subresource, UINT *pMipSlice, UINT *pArraySlice, UINT *pPlaneSlice
+) {
+  uint32_t ExtentOr = Desc.Width;
+  uint32_t ArraySize = 1;
+  switch (Desc.Dimension) {
+  default:
+    return 1;
+  case D3D12_RESOURCE_DIMENSION_TEXTURE1D:
+    ArraySize = Desc.DepthOrArraySize;
+    break;
+  case D3D12_RESOURCE_DIMENSION_TEXTURE2D:
+    ExtentOr |= Desc.Height;
+    ArraySize = Desc.DepthOrArraySize;
+    break;
+  case D3D12_RESOURCE_DIMENSION_TEXTURE3D:
+    ExtentOr |= Desc.Height | Desc.DepthOrArraySize;
+    break;
+  }
+  auto MaxMipLevels = 32 - bit::lzcnt(ExtentOr);
+  auto MipLevels = Desc.MipLevels ? Desc.MipLevels : MaxMipLevels;
+
+  if (pMipSlice)
+    *pMipSlice = Subresource % MipLevels;
+  if (pArraySlice)
+    *pArraySlice = ((Subresource / MipLevels) % ArraySize);
+  if (pPlaneSlice)
+    *pPlaneSlice = (Subresource / (MipLevels * ArraySize));
+  return MipLevels;
+}
+
+bool
+IsD3D12BoxInBounds(D3D12_BOX &box, D3D12_BOX &bounds) {
+  if (box.left < bounds.left)
+    return false;
+  if (box.top < bounds.top)
+    return false;
+  if (box.front < bounds.front)
+    return false;
+  if (box.right > bounds.right)
+    return false;
+  if (box.bottom > bounds.bottom)
+    return false;
+  if (box.back > bounds.back)
+    return false;
+
+  return true;
 }
 
 } // namespace dxmt

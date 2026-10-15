@@ -403,7 +403,7 @@ void handle_signature_ps(
     unsigned reg = Inst.m_Operands[0].m_Index[0].m_RegIndex;
     auto mask = Inst.m_Operands[0].m_WriteMask >> 4;
     auto siv = Inst.m_InputPSDeclSIV.Name;
-    auto interpolation =
+    [[maybe_unused]] auto interpolation =
       to_air_interpolation(Inst.m_InputPSDeclSGV.InterpolationMode);
     uint32_t assigned_index;
     switch (siv) {
@@ -587,6 +587,7 @@ void handle_signature_ps(
           });
         };
       });
+      sm50_shader->ps_has_coverage_output = 1;
       break;
     }
 
@@ -600,12 +601,15 @@ void handle_signature_ps(
       max_output_register = std::max(reg + 1, max_output_register);
       pso_valid_output_reg_mask |= (1 << reg);
       if (sig.mask() == 0) break;
-      auto type = sig.componentType();
-      if (type == RegisterComponentType::Uint)
+      auto sig_type = sig.componentType();
+      if (sig_type == RegisterComponentType::Uint)
         sm50_shader->ps_output_declared_uint_mask |= (1 << reg);
-      else if (type == RegisterComponentType::Int)
+      else if (sig_type == RegisterComponentType::Int)
         sm50_shader->ps_output_declared_sint_mask |= (1 << reg);
       signature_handlers.push_back([=](SignatureContext &ctx) {
+        auto type = component_type_from_pixel_format(ctx.pixel_formats[reg]);
+        if (ctx.dual_source_blending || type == RegisterComponentType::Unknown)
+          type = sig_type;
         uint32_t assigned_index;
         /* The bound RTV can carry an integer format while the shader
          * declares a float output (undefined in D3D11, tolerated by
