@@ -9,12 +9,12 @@ The most recent development builds can be found [here](https://github.com/3Shain
 
 ## This fork
 
-Zagrios/dxmt builds the native `libdxmt-native.dylib` that [Voile](https://github.com/Zagrios/voile) ships for Obelisk's Linux engine, where [Neptune](https://github.com/Zagrios/neptune)'s render server loads it. It is upstream DXMT (the commit [utmapp/dxmt](https://github.com/utmapp/dxmt) builds on), plus:
+Zagrios/dxmt builds the native `libdxmt-native.dylib` that [Voile](https://github.com/Zagrios/voile) ships for Obelisk's Linux engine, where [Neptune](https://github.com/Zagrios/neptune)'s render server loads it. It is upstream DXMT, merged up to 3Shain/dxmt's main of 2026-10-07, plus:
 
-- the commits of UTM's native backend this use needs: the single native dylib, shared textures and events with their version 2 handle, the Metal pipeline and error-retain crash fixes, typed integer render-target outputs, an occlusion query that ends in a draw-less chunk, and `UpdateSubresource` into STAGING resources;
+- the commits of [UTM](https://github.com/utmapp/dxmt)'s native backend this use needs: the single native dylib, shared textures and events with their version 2 handle, the Metal pipeline and error-retain crash fixes, typed integer render-target outputs, an occlusion query that ends in a draw-less chunk, and `UpdateSubresource` into STAGING resources;
 - a 16-bit `WCHAR` in native builds, so the structures an embedder hands in keep Windows' layout.
 
-The `upstream` branch follows 3Shain/dxmt.
+The `upstream` branch follows 3Shain/dxmt; `main` takes its new commits by merging it.
 
 ## Build
 
