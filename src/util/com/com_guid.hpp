@@ -98,8 +98,10 @@ template <size_t N> constexpr GUID make_guid(const char (&str)[N]) {
 # define DXMT_DEFINE_GUID(iid, guid_str) \
   constexpr GUID iid = dxmt::guid::make_guid(guid_str);
 
+// The constexpr local forces the parse to compile time: returned directly, a QueryInterface would parse the string
+// on every call.
 # define DXMT_DECLARE_UUIDOF_HELPER(type, guid_str) \
-  extern "C++" { template <> constexpr GUID __uuidof_helper<type>() { return dxmt::guid::make_guid(guid_str); } } \
+  extern "C++" { template <> constexpr GUID __uuidof_helper<type>() { constexpr GUID guid = dxmt::guid::make_guid(guid_str); return guid; } } \
   extern "C++" { template <> constexpr GUID __uuidof_helper<type*>() { return __uuidof_helper<type>(); } } \
   extern "C++" { template <> constexpr GUID __uuidof_helper<const type*>() { return __uuidof_helper<type>(); } } \
   extern "C++" { template <> constexpr GUID __uuidof_helper<type&>() { return __uuidof_helper<type>(); } } \
