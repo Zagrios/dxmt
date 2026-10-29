@@ -439,9 +439,11 @@ HRESULT CreateDeviceTextureInternal(MTLD3D11Device *pDevice,
       ERR("DeviceTexture: NT-handle sharing not supported natively");
       return E_FAIL;
     }
+    /* A texture the linear shm path cannot hold (an array, mipmaps, MSAA, a compressed or depth format, not 2D) is
+     * created unshared: games flag resources they never open elsewhere (THE FINALS: a 2-slice array for its practice
+     * range, whose failure the game reports as running out of video memory). GetSharedHandle then fails on it. */
     if constexpr (!std::is_same_v<typename tag::DESC1, D3D11_TEXTURE2D_DESC1>) {
-      ERR("DeviceTexture: only Texture2D can be shared natively");
-      return E_FAIL;
+      WARN("DeviceTexture: only Texture2D can be shared natively, creating it unshared");
     } else {
       Rc<Texture> shm_texture;
       Rc<TextureAllocation> shm_allocation;
@@ -449,14 +451,15 @@ HRESULT CreateDeviceTextureInternal(MTLD3D11Device *pDevice,
       HRESULT hr = AllocateShmLinearTexture2D(
           pDevice, finalDesc, info, -1, 0, 0, 0, shm_texture, shm_allocation, pod
       );
-      if (FAILED(hr))
-        return hr;
-      texture = std::move(shm_texture);
-      initialize(std::move(shm_allocation));
-      *ppTexture = reinterpret_cast<typename tag::COM_IMPL *>(
-          ref(new DeviceTexture<tag>(&finalDesc, std::move(texture), pod, pDevice))
-      );
-      return S_OK;
+      if (SUCCEEDED(hr)) {
+        texture = std::move(shm_texture);
+        initialize(std::move(shm_allocation));
+        *ppTexture = reinterpret_cast<typename tag::COM_IMPL *>(
+            ref(new DeviceTexture<tag>(&finalDesc, std::move(texture), pod, pDevice))
+        );
+        return S_OK;
+      }
+      WARN("DeviceTexture: texture cannot be shared natively, creating it unshared");
     }
   }
 #else
