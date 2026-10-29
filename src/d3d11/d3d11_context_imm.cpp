@@ -376,12 +376,15 @@ public:
       break;
     }
     case D3D11_QUERY_TIMESTAMP: {
+      // The sample is taken inside the command buffer: the result is there once that buffer completes, whenever it is
+      // committed. No flush here: Unreal Engine ends hundreds of timestamps per frame (GPU stats), and a command buffer
+      // for each kept the queue's 32 chunks full (THE FINALS: about 150 command buffers per frame). A GetData without
+      // D3D11_ASYNC_GETDATA_DONOTFLUSH still flushes while the result is not there.
       if (auto query = static_cast<MTLD3D11TimestampQuery *>(pAsync)->End()) {
         InvalidateCurrentPass(true);
         EmitOP([query = Rc(query)](ArgumentEncodingContext &enc) mutable {
           enc.sampleTimestamp(std::move(query));
         });
-        promote_flush = true;
       }
       break;
     }
