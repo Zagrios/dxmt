@@ -219,9 +219,13 @@ public:
       hr = S_OK;
 
     // We can't really reconstruct the version numbers
-    // returned by Windows drivers from Metal
+    // returned by Windows drivers from Metal. Games parse
+    // this one and some crash on ~0 (Hunt: Showdown 1896),
+    // so report 35.0.15.8180, the made-up DriverVersion
+    // Wine's win32u writes under HKLM\Software\Microsoft\DirectX.
+    // DXVK makes one up too.
     if (SUCCEEDED(hr) && umd_version)
-      umd_version->QuadPart = ~0ull;
+      umd_version->QuadPart = 0x00230000000f1ff4ull;
 
     if (FAILED(hr)) {
       Logger::err("DXGI: CheckInterfaceSupport: Unsupported interface");
