@@ -14,6 +14,8 @@ namespace dxmt {
 Com<IMTLDXGIAdapter> CreateAdapter(WMT::Device Device,
                                    IDXGIFactory2 *pFactory, Config &config);
 
+void InitializeMetalCachePath();
+
 class MTLDXGIFactory : public MTLDXGIObject<IDXGIFactory6> {
 
 public:
@@ -326,6 +328,11 @@ private:
 
 extern "C" HRESULT __stdcall CreateDXGIFactory2(UINT Flags, REFIID riid,
                                                 void **ppFactory) {
+#ifndef _WIN32
+  // Done in DllMain otherwise; a factory comes before any device
+  static std::once_flag metal_cache_init;
+  std::call_once(metal_cache_init, InitializeMetalCachePath);
+#endif
   try {
     MTLDXGIFactory* factory = new MTLDXGIFactory(Flags);
     HRESULT hr = factory->QueryInterface(riid, ppFactory);
