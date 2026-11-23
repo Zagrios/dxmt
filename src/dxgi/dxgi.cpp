@@ -52,16 +52,31 @@ static void InitializeVendorExtensionNV() {
   if (key3) RegCloseKey(key3);
 };
 
-static void InitializeMetalCachePath() {
+#endif
+
+void InitializeMetalCachePath() {
   if (env::getEnvVar("DXMT_USE_DEFAULT_METAL_CACHE") == "1")
     return;
   // This is the framework cache (mainly for PSOs), not managed by DXMT
-  auto metal_cache_path = str::format("dxmt/", env::getExeName(), "/com.apple.metal");
+  std::string metal_cache_path = env::getEnvVar("DXMT_SHADER_CACHE_PATH");
+  if (metal_cache_path.starts_with("/")) {
+    if (!metal_cache_path.ends_with('/'))
+      metal_cache_path += "/";
+    metal_cache_path += "com.apple.metal";
+  } else {
+#ifdef _WIN32
+    metal_cache_path = str::format("dxmt/", env::getExeName(), "/com.apple.metal");
+#else
+    // A native host process keeps Metal's default cache, which is per bundle identifier
+    return;
+#endif
+  }
   if (!WMTSetMetalShaderCachePath(metal_cache_path.c_str())) {
     Logger::info("Failed to set Metal cache path, fallback to system default");
   }
 }
 
+#ifdef _WIN32
 extern "C" BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason,
                                LPVOID reserved) {
   if (reason != DLL_PROCESS_ATTACH)

@@ -115,7 +115,7 @@ The following environment variables can be used for **debugging** purposes.
 - `DXMT_LOG_LEVEL=none|error|warn|info|debug` Controls message logging.
 - `DXMT_LOG_PATH=/some/directory` Changes path where log files are stored. Set to `none` to disable log file creation entirely, without disabling logging.
 - `DXMT_SHADER_CACHE=0`: Disables the internal shader cache.
-- `DXMT_SHADER_CACHE_PATH=/some/absolute/darwin/directory`: Path to internal shader cache files. Default to `$(getconf DARWIN_USER_CACHE_DIR)/dxmt/<executable name with extension>`.
+- `DXMT_SHADER_CACHE_PATH=/some/absolute/darwin/directory`: Path to internal shader cache files. Default to `$(getconf DARWIN_USER_CACHE_DIR)/dxmt/<executable name with extension>`. Metal's own shader cache is kept in its `com.apple.metal` subdirectory.
 
 
 ### Logs
