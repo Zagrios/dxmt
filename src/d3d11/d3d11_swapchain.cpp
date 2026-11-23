@@ -179,6 +179,9 @@ public:
     }
 
     handle_alt_tab_ = Config::getInstance().getOption<bool>("dxgi.handleAltTab", false);
+    // as win32u reads it
+    auto emulate = env::getEnvVar("WINE_OBELISK_EMULATE_MODES");
+    emulated_modes_ = !emulate.empty() && emulate[0] != '0';
 
     hud.initialize(GetVersionDescriptionText(device_->GetDirectXVersion(), device_->GetFeatureLevel()));
 
@@ -383,7 +386,8 @@ public:
     DXGI_MODE_DESC1 preferred_mode = *pDisplayMode;
     DXGI_MODE_DESC1 selected_mode = {};
 
-    if (!(desc_.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH)) {
+    // When Wine emulates display modes, the requested size costs no real mode switch
+    if (!(desc_.Flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH) && !emulated_modes_) {
       preferred_mode.Width = 0;
       preferred_mode.Height = 0;
     }
@@ -1089,6 +1093,7 @@ private:
   dxmt::mutex mutex_;
 
   bool handle_alt_tab_;
+  bool emulated_modes_;
 
   std::conditional<EnableMetalFX, Rc<SpatialScaler>, std::monostate>::type metalfx_scaler;
   std::conditional<EnableMetalFX, Com<D3D11ResourceCommon>, std::monostate>::type upscaled_backbuffer_;
