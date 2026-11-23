@@ -4,6 +4,7 @@
 
 - `DXMT_CONFIG_FILE=/xxx/dxmt.conf` Sets path to the configuration file. Check `dxmt.conf` in the project directory for reference.
 - `DXMT_CONFIG="d3d11.preferredMaxFrameRate=30;"` Can be used to set config variables through the environment instead of a configuration file using the same syntax. `;` is used as a seperator.
+- `DXMT_APP_NAME=game.exe` Sets the executable name when DXMT can't find it, as in native builds. It selects the built-in profile, the `[game.exe]` section of the configuration file and the shader cache directory.
 
 ### MetalFX Spatial Upscaling for Swapchain
 

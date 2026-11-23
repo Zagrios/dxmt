@@ -58,6 +58,8 @@ size_t matchFileExtension(const std::string &name, const char *ext) {
 
 std::string getExeName() {
   std::string fullPath = getExePath();
+  if (fullPath.empty())
+    return getEnvVar("DXMT_APP_NAME");
   auto n = fullPath.find_last_of(env::PlatformDirSlash);
 
   return (n != std::string::npos) ? fullPath.substr(n + 1) : fullPath;
