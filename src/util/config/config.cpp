@@ -24,11 +24,20 @@
 
 namespace dxmt {
 
+  // The profiles match a Windows path. Without one, as in native builds,
+  // match the name from DXMT_APP_NAME as if it were in a folder.
+  static std::string getAppPath() {
+    std::string path = env::getExePath();
+    if (path.empty() && !(path = env::getExeName()).empty())
+      path = "\\" + path;
+    return path;
+  }
+
   class SingletonConfig : public Config {
   public:
     SingletonConfig() {
       merge(Config::getUserConfig());
-      merge(Config::getAppConfig(env::getExePath()));
+      merge(Config::getAppConfig(getAppPath()));
     };
 
     SingletonConfig(SingletonConfig const&) = delete;             
