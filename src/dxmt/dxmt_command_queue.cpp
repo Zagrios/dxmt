@@ -19,6 +19,7 @@
 
 #include "dxmt_command_queue.hpp"
 #include "Metal.hpp"
+#include "config/config.hpp"
 #include "dxmt_statistics.hpp"
 #include "util_env.hpp"
 #include "util_win32_compat.h"
@@ -61,6 +62,12 @@ CommandQueue::CommandQueue(WMT::Device device) :
     chunk.reset();
   };
   event = device.newSharedEvent();
+
+  int32_t latency_cap = Config::getInstance().getOption<int32_t>("dxgi.maxFrameLatency", 0);
+  if (latency_cap >= 1 && latency_cap <= 16) {
+    max_latency_cap_ = latency_cap;
+    max_latency_ = std::min(max_latency_, max_latency_cap_);
+  }
 
   std::string env = env::getEnvVar("DXMT_CAPTURE_FRAME");
 

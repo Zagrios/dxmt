@@ -12,3 +12,7 @@ Set environment variable `DXMT_METALFX_SPATIAL_SWAPCHAIN=1` to enable MetalFX sp
 ### Metal Frame Pacing
 
 `d3d11.preferredMaxFrameRate` can be set to enforce the application's frame pacing being controled by Metal. The value must be a factor of your display's refresh rate. (e.g. 15/30/40/60/120 is valid for a 120hz display).
+
+### Frame Latency
+
+`dxgi.maxFrameLatency` limits how many frames the CPU may queue ahead of the GPU, lowering what the application asks for with `SetMaximumFrameLatency` (3 by default). Set it to 1 to reduce input lag in GPU-bound games. The latency of a swap chain's waitable object, 1 by default, is left as is.

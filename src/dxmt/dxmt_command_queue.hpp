@@ -33,6 +33,7 @@
 #include "log/log.hpp"
 #include "thread.hpp"
 #include "util_cpu_fence.hpp"
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -89,6 +90,7 @@ private:
 };
 
 constexpr uint32_t kCommandChunkCount = 32;
+constexpr uint32_t kDefaultMaxLatency = 3;
 
 class CommandQueue;
 
@@ -170,7 +172,10 @@ private:
   std::array<CommandChunk, kCommandChunkCount> chunks;
   uint64_t encoder_seq = 1;
   uint64_t frame_count = 0;
-  uint32_t max_latency_ = 3;
+  uint32_t max_latency_ = kDefaultMaxLatency;
+  uint32_t max_latency_cap_ = ~0u;
+  // what the app asked for, which it reads back uncapped
+  uint32_t requested_latency_ = kDefaultMaxLatency;
 
   dxmt::thread encodeThread;
   dxmt::thread finishThread;
@@ -272,9 +277,13 @@ public:
     statistics.at(frame_count).latency = max_latency_;
   }
 
-  uint32_t GetMaxLatency() { return max_latency_; }
+  uint32_t GetMaxLatency() { return requested_latency_; }
 
-  void SetMaxLatency(uint32_t value) { max_latency_ = value; };
+  void SetMaxLatency(uint32_t value) {
+    // 0 restores the default, as it does on Windows
+    requested_latency_ = value ? value : kDefaultMaxLatency;
+    max_latency_ = std::min(requested_latency_, max_latency_cap_);
+  };
 
   void
   WaitCPUFence(uint64_t seq) {
