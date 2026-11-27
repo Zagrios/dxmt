@@ -172,10 +172,10 @@ private:
   std::array<CommandChunk, kCommandChunkCount> chunks;
   uint64_t encoder_seq = 1;
   uint64_t frame_count = 0;
+  // what the app asked for, which it reads back as is
   uint32_t max_latency_ = kDefaultMaxLatency;
+  // dxgi.maxFrameLatency
   uint32_t max_latency_cap_ = ~0u;
-  // what the app asked for, which it reads back uncapped
-  uint32_t requested_latency_ = kDefaultMaxLatency;
 
   dxmt::thread encodeThread;
   dxmt::thread finishThread;
@@ -268,22 +268,20 @@ public:
     frame_count++;
     statistics.at(frame_count).reset();
     // After present N-th frame (N starts from 1), wait for (N - max_latency)-th frame to finish rendering 
-    if (likely(frame_count > max_latency_)) {
+    uint32_t latency = std::min(max_latency_, max_latency_cap_);
+    if (likely(frame_count > latency)) {
       auto t0 = clock::now();
-      frame_latency_fence_.wait(frame_count - max_latency_);
+      frame_latency_fence_.wait(frame_count - latency);
       auto t1 = clock::now();
       statistics.at(frame_count).present_latency_interval += (t1 - t0);
     }
-    statistics.at(frame_count).latency = max_latency_;
+    statistics.at(frame_count).latency = latency;
   }
 
-  uint32_t GetMaxLatency() { return requested_latency_; }
+  uint32_t GetMaxLatency() { return max_latency_; }
 
-  void SetMaxLatency(uint32_t value) {
-    // 0 restores the default, as it does on Windows
-    requested_latency_ = value ? value : kDefaultMaxLatency;
-    max_latency_ = std::min(requested_latency_, max_latency_cap_);
-  };
+  // 0 restores the default, as it does on Windows
+  void SetMaxLatency(uint32_t value) { max_latency_ = value ? value : kDefaultMaxLatency; };
 
   void
   WaitCPUFence(uint64_t seq) {

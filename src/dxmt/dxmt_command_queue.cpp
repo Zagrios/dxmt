@@ -64,10 +64,8 @@ CommandQueue::CommandQueue(WMT::Device device) :
   event = device.newSharedEvent();
 
   int32_t latency_cap = Config::getInstance().getOption<int32_t>("dxgi.maxFrameLatency", 0);
-  if (latency_cap >= 1 && latency_cap <= 16) {
+  if (latency_cap >= 1 && latency_cap <= 16)
     max_latency_cap_ = latency_cap;
-    max_latency_ = std::min(max_latency_, max_latency_cap_);
-  }
 
   std::string env = env::getEnvVar("DXMT_CAPTURE_FRAME");
 
